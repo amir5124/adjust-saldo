@@ -580,6 +580,14 @@ app.post('/create-qris', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /callback
 // ============================================================
+// ============================================================
+// ENDPOINT: POST /callback (DIPERBAIKI)
+// ============================================================
+let tableName = null;
+let dbData = null;
+// ============================================================
+// ENDPOINT: POST /callback
+// ============================================================
 app.post('/callback', async (req, res) => {
     console.log('\n📞 [CALLBACK] ============================================');
     console.log('📞 [CALLBACK] Payload:', JSON.stringify(req.body, null, 2));
@@ -594,11 +602,11 @@ app.post('/callback', async (req, res) => {
     console.log(`🔍 [CALLBACK] Processing: ${partner_reff}`);
     const connection = await pool.getConnection();
 
+    let tableName = null;
+    let dbData = null;
+
     try {
         await connection.beginTransaction();
-
-        let tableName = null;
-        let dbData = null;
 
         let [rows] = await connection.execute(
             `SELECT status, customer_name, amount, bank_code as method_code, 'VA' as type FROM inquiry_va WHERE partner_reff = ? FOR UPDATE`,
@@ -607,6 +615,7 @@ app.post('/callback', async (req, res) => {
         if (rows.length > 0) {
             tableName = 'inquiry_va';
             dbData = rows[0];
+            console.log(`✅ [CALLBACK] Found in inquiry_va: status=${dbData.status}`);
         }
 
         if (!tableName) {
@@ -617,12 +626,14 @@ app.post('/callback', async (req, res) => {
             if (rows.length > 0) {
                 tableName = 'inquiry_qris';
                 dbData = rows[0];
+                console.log(`✅ [CALLBACK] Found in inquiry_qris: status=${dbData.status}`);
             }
         }
 
         if (!tableName || !dbData) {
             await connection.rollback();
             console.error(`❌ [CALLBACK] Transaction not found: ${partner_reff}`);
+            logToFile(`Transaction not found: ${partner_reff}`, 'ERROR');
             return res.status(404).json({ error: 'Data transaksi tidak ditemukan' });
         }
 
@@ -637,35 +648,51 @@ app.post('/callback', async (req, res) => {
             [partner_reff]
         );
         await connection.commit();
+        console.log(`✅ [CALLBACK] DB updated to SUKSES for ${partner_reff}`);
 
         let methodCode = dbData.method_code;
         if (dbData.type === 'RETAIL') methodCode = (methodCode || 'RETAIL').toUpperCase();
 
+        console.log(`💰 [CALLBACK] addBalance: user=${dbData.customer_name}, amount=${dbData.amount}, method=${methodCode}`);
+
         await addBalance(dbData.amount, dbData.customer_name, methodCode, serialnumber || partner_reff);
 
+        console.log(`🎉 [CALLBACK] SUCCESS: Saldo ditambahkan untuk ${dbData.customer_name} via ${methodCode}`);
         res.json({ message: 'Callback diterima dan saldo ditambahkan' });
 
     } catch (err) {
-        if (tableName) {
-            try {
+        console.error(`❌ [CALLBACK] Error in try block:`, err.message);
+
+        try {
+            if (tableName) {
                 await connection.execute(
                     `UPDATE ${tableName} SET status = 'PENDING' WHERE partner_reff = ?`,
                     [partner_reff]
                 );
                 await connection.commit();
-            } catch (rbErr) {
-                console.error(`❌ [CALLBACK] Rollback failed: ${rbErr.message}`);
+                console.warn(`⚠️ [CALLBACK] Rolled back to PENDING for ${partner_reff}`);
+            } else {
+                await connection.rollback();
+                console.warn(`⚠️ [CALLBACK] Rollback transaction (no table found)`);
             }
-        } else {
-            await connection.rollback();
+        } catch (rbErr) {
+            console.error(`❌ [CALLBACK] Rollback failed: ${rbErr.message}`);
+            try {
+                await connection.rollback();
+            } catch (finalErr) {
+                console.error(`❌ [CALLBACK] Final rollback failed: ${finalErr.message}`);
+            }
         }
+
         logToFile(`❌ Callback Error [${partner_reff}]: ${err.message}`, 'ERROR');
+        console.error(`❌ [CALLBACK] Error: ${err.message}`);
         res.status(500).json({ error: 'Internal Server Error', detail: err.message });
+
     } finally {
         connection.release();
+        console.log(`🔓 [CALLBACK] Connection released for ${partner_reff}`);
     }
 });
-
 // ============================================================
 // ENDPOINT: GET /download-qr/:partner_reff
 // ============================================================
