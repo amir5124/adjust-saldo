@@ -1,5 +1,8 @@
 'use strict';
 
+// Load environment variables
+require('dotenv').config();
+
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
@@ -15,10 +18,10 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // ============================================================
-// KONFIGURASI - TESTING
+// KONFIGURASI - DARI ENVIRONMENT VARIABLES
 // ============================================================
-const API_KEY_JAGEL = "c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO";
-const JAGEL_BASE_URL = "https://api.jagel.id/v1";
+const API_KEY_JAGEL = process.env.JAGEL_APIKEY || "c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO";
+const JAGEL_BASE_URL = process.env.JAGEL_BASE_URL || "https://api.jagel.id/v1";
 
 const CONFIG = {
     clientId: process.env.LINKQU_CLIENT_ID || 'testing',
@@ -32,13 +35,15 @@ const CONFIG = {
     linkquGateway: process.env.LINKQU_GATEWAY || 'https://gateway-dev.linkqu.id/linkqu-partner',
     jagelBaseUrl: process.env.JAGEL_BASE_URL || 'https://api.jagel.id/v1',
     port: parseInt(process.env.PORT || '3000'),
+
     // Twilio Configuration
     twilioSid: process.env.TWILIO_ACCOUNT_SID || '',
     twilioAuth: process.env.TWILIO_AUTH_TOKEN || '',
-    twilioWaNumber: process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+62882005447472',
+    twilioWaNumber: process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886',
     adminWaNumber: process.env.ADMIN_WHATSAPP_NUMBER || 'whatsapp:+6282323907426',
     csNumber: process.env.CS_PHONE_NUMBER || '6282226666610',
     baseUrl: process.env.BASE_URL || 'http://localhost:3000',
+
     // Twilio Content Template SIDs (Approved)
     templateDriverConfirmation: process.env.TWILIO_TEMPLATE_DRIVER_CONFIRMATION || 'HX0f899a4bc82aca9611ef757228c3ba61',
     templateDriverOrderAccepted: process.env.TWILIO_TEMPLATE_DRIVER_ACCEPTED || 'HX59e4eb4a2e31316585b76a3fbb2bfc8d',
@@ -46,6 +51,39 @@ const CONFIG = {
     templateDriverRejected: process.env.TWILIO_TEMPLATE_DRIVER_REJECTED || 'HX883e49ca163a114e5674f0be7dd53bec',
     templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da'
 };
+
+// ============================================================
+// TWILIO INITIALIZATION WITH DETAILED LOGS
+// ============================================================
+let twilioClient = null;
+
+function initTwilio() {
+    console.log('\n🔧 [TWILIO] Initializing...');
+    console.log(`   TWILIO_ACCOUNT_SID: ${CONFIG.twilioSid ? '✅ SET (' + CONFIG.twilioSid.substring(0, 10) + '...)' : '❌ MISSING'}`);
+    console.log(`   TWILIO_AUTH_TOKEN: ${CONFIG.twilioAuth ? '✅ SET (' + CONFIG.twilioAuth.substring(0, 10) + '...)' : '❌ MISSING'}`);
+    console.log(`   TWILIO_WHATSAPP_NUMBER: ${CONFIG.twilioWaNumber}`);
+
+    if (!CONFIG.twilioSid || !CONFIG.twilioAuth) {
+        console.error('\n❌❌❌ TWILIO CREDENTIALS MISSING! ❌❌❌');
+        console.error('Please set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env file');
+        console.error('WhatsApp messages will NOT be sent!\n');
+        return null;
+    }
+
+    try {
+        twilioClient = twilio(CONFIG.twilioSid, CONFIG.twilioAuth);
+        console.log('✅ Twilio client initialized successfully!');
+        console.log(`   WhatsApp Business Number: ${CONFIG.twilioWaNumber}`);
+        console.log(`   Templates ready: ${Object.keys(CONFIG).filter(k => k.startsWith('template')).length} templates\n`);
+        return twilioClient;
+    } catch (error) {
+        console.error('❌ Failed to initialize Twilio client:', error.message);
+        return null;
+    }
+}
+
+// Panggil initTwilio di awal
+initTwilio();
 
 // ============================================================
 // DATABASE POOL
@@ -261,22 +299,25 @@ async function addBalance(amount, customer_name, methodCode, serialnumber) {
         throw error;
     }
 }
-// ============================================================
-// TWILIO HELPER FUNCTIONS WITH CONTENT TEMPLATE
-// ============================================================
-let twilioClient = null;
 
-function initTwilio() {
-    if (!twilioClient && CONFIG.twilioSid && CONFIG.twilioAuth) {
-        twilioClient = twilio(CONFIG.twilioSid, CONFIG.twilioAuth);
-        console.log('✅ Twilio client initialized');
-    }
-    return twilioClient;
-}
+// ============================================================
+// TWILIO HELPER FUNCTIONS WITH CONTENT TEMPLATE & DETAILED LOGS
+// ============================================================
 
 // Format phone number to WhatsApp format
 function formatWhatsAppNumber(phoneNumber) {
+    if (!phoneNumber) {
+        console.error('❌ Empty phone number provided');
+        return null;
+    }
+
     let cleaned = phoneNumber.toString().replace(/\D/g, '');
+
+    if (cleaned.length < 10) {
+        console.error(`❌ Invalid phone number: ${phoneNumber} (too short)`);
+        return null;
+    }
+
     if (!cleaned.startsWith('62')) {
         if (cleaned.startsWith('0')) {
             cleaned = '62' + cleaned.substring(1);
@@ -284,61 +325,107 @@ function formatWhatsAppNumber(phoneNumber) {
             cleaned = '62' + cleaned;
         }
     }
-    return `whatsapp:${cleaned}`;
+
+    const formatted = `whatsapp:${cleaned}`;
+    console.log(`📱 Formatted: ${phoneNumber} -> ${formatted}`);
+    return formatted;
 }
 
 // Send WhatsApp message using Content Template (for business-initiated)
 async function sendWhatsAppTemplate(to, templateSid, variables) {
-    const client = initTwilio();
-    const whatsappTo = formatWhatsAppNumber(to);
-
-    console.log(`📱 [TEMPLATE] Sending to: ${whatsappTo}`);
+    console.log(`\n📤 [SEND-TEMPLATE] Starting...`);
+    console.log(`   To: ${to}`);
     console.log(`   Template SID: ${templateSid}`);
-    console.log(`   Variables:`, variables);
+    console.log(`   Variables:`, JSON.stringify(variables, null, 2));
 
-    if (!client) {
-        console.log('⚠️ [MOCK] WhatsApp template would be sent:', { to: whatsappTo, templateSid, variables });
-        return { success: true, mock: true };
+    // Validasi Twilio client
+    if (!twilioClient) {
+        console.error('❌ Twilio client not initialized! Attempting to re-initialize...');
+        initTwilio();
+        if (!twilioClient) {
+            console.error('❌ Twilio client still not available! Check your .env file!');
+            return { success: false, error: 'Twilio client not initialized', mock: true };
+        }
+    }
+
+    // Validasi nomor tujuan
+    const whatsappTo = formatWhatsAppNumber(to);
+    if (!whatsappTo) {
+        return { success: false, error: 'Invalid phone number' };
+    }
+
+    // Validasi template SID
+    if (!templateSid || !templateSid.startsWith('HX')) {
+        console.error(`❌ Invalid template SID: ${templateSid}`);
+        return { success: false, error: 'Invalid template SID' };
     }
 
     try {
-        const result = await client.messages.create({
+        console.log(`📱 [TEMPLATE] Sending to: ${whatsappTo}`);
+
+        const result = await twilioClient.messages.create({
             from: CONFIG.twilioWaNumber,
             to: whatsappTo,
             contentSid: templateSid,
             contentVariables: JSON.stringify(variables)
         });
-        console.log(`✅ Template sent, SID: ${result.sid}`);
-        return { success: true, sid: result.sid };
+
+        console.log(`✅ Template sent successfully!`);
+        console.log(`   Message SID: ${result.sid}`);
+        console.log(`   Status: ${result.status}`);
+
+        return { success: true, sid: result.sid, status: result.status };
+
     } catch (error) {
         console.error('❌ Twilio template error:', error.message);
+
+        // Detail error berdasarkan kode
         if (error.code === 63016) {
             console.error('   ⚠️ Template not approved or invalid Content SID!');
+            console.error('   Check template status in Twilio Console');
         }
+        if (error.code === 21211) {
+            console.error('   ⚠️ Invalid phone number format!');
+            console.error(`   Make sure ${to} is a valid WhatsApp number`);
+        }
+        if (error.code === 21610) {
+            console.error('   ⚠️ The phone number is not opted in to WhatsApp!');
+            console.error(`   Customer must send "join" to ${CONFIG.twilioWaNumber} first`);
+        }
+        if (error.code === 63007) {
+            console.error('   ⚠️ Template language not supported or invalid');
+        }
+
         return { success: false, error: error.message, code: error.code };
     }
 }
 
 // Send free-form message (ONLY for replies within 24-hour window)
 async function sendWhatsAppFreeForm(to, message) {
-    const client = initTwilio();
+    console.log(`\n📤 [SEND-FREE-FORM] Starting...`);
+    console.log(`   To: ${to}`);
+    console.log(`   Message: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
+
+    if (!twilioClient) {
+        console.error('❌ Twilio client not initialized!');
+        return { success: false, error: 'Twilio client not initialized' };
+    }
+
     const whatsappTo = formatWhatsAppNumber(to);
-
-    console.log(`📱 [FREE-FORM] Sending to: ${whatsappTo}`);
-
-    if (!client) {
-        console.log('⚠️ [MOCK] Free-form message:', { to: whatsappTo, message: message.substring(0, 100) });
-        return { success: true, mock: true };
+    if (!whatsappTo) {
+        return { success: false, error: 'Invalid phone number' };
     }
 
     try {
-        const result = await client.messages.create({
+        const result = await twilioClient.messages.create({
             from: CONFIG.twilioWaNumber,
             to: whatsappTo,
             body: message
         });
+
         console.log(`✅ Free-form sent, SID: ${result.sid}`);
         return { success: true, sid: result.sid };
+
     } catch (error) {
         console.error('❌ Free-form error:', error.message);
         return { success: false, error: error.message };
@@ -353,6 +440,48 @@ function formatRupiah(amount) {
         minimumFractionDigits: 0
     }).format(amount);
 }
+
+// ============================================================
+// ENDPOINT: GET /test-twilio (UNTUK TESTING TWILIO)
+// ============================================================
+app.get('/test-twilio', async (req, res) => {
+    console.log('\n🧪 [TEST-TWILIO] Testing Twilio configuration...');
+
+    const testNumber = req.query.to || '';
+    const testTemplate = req.query.template || CONFIG.templateDriverConfirmation;
+
+    const result = {
+        success: true,
+        timestamp: new Date().toISOString(),
+        twilio_configured: !!(CONFIG.twilioSid && CONFIG.twilioAuth),
+        twilio_client_ready: !!twilioClient,
+        whatsapp_number: CONFIG.twilioWaNumber,
+        templates: {
+            driver_confirmation: CONFIG.templateDriverConfirmation,
+            driver_accepted: CONFIG.templateDriverOrderAccepted,
+            customer_confirmed: CONFIG.templateCustomerOrderConfirmed,
+            driver_rejected: CONFIG.templateDriverRejected,
+            no_driver: CONFIG.templateNoDriverAvailable
+        }
+    };
+
+    // Jika ada nomor tujuan, coba kirim test message
+    if (testNumber && req.query.send === 'true') {
+        console.log(`📤 [TEST] Attempting to send test message to ${testNumber}`);
+
+        const testVariables = {
+            "1": "Test Driver",
+            "2": "Test Customer",
+            "3": "Rp 10.000",
+            "4": "1"
+        };
+
+        const sendResult = await sendWhatsAppTemplate(testNumber, testTemplate, testVariables);
+        result.test_send = sendResult;
+    }
+
+    res.json(result);
+});
 
 // ============================================================
 // ENDPOINT: POST /adjust.php (Jagel action handler)
@@ -1143,7 +1272,7 @@ app.get('/drivers', async (req, res) => {
 app.post('/driver-confirmation', async (req, res) => {
     const { order_id, driver_id, driver_name, driver_phone, customer_name, total_amount, jumlah_toko } = req.body;
 
-    console.log(`📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
+    console.log(`\n📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
 
     driverConfirmations.set(order_id, {
         driver_id,
@@ -1186,7 +1315,7 @@ app.post('/driver-confirmation', async (req, res) => {
 app.post('/send-order-details', async (req, res) => {
     const { order_id, driver_phone, driver_name, customer_name, customer_phone, stores_detail, subtotal, total_ongkir, total, order_note } = req.body;
 
-    console.log(`📦 [SEND-ORDER-DETAILS] Order: ${order_id}`);
+    console.log(`\n📦 [SEND-ORDER-DETAILS] Order: ${order_id}`);
 
     // Send to Driver using template
     const driverVariables = {
@@ -1233,6 +1362,8 @@ app.post('/send-order-details', async (req, res) => {
 app.post('/send-driver-rejected', async (req, res) => {
     const { customer_phone, customer_name } = req.body;
 
+    console.log(`\n📋 [SEND-DRIVER-REJECTED] To: ${customer_name} (${customer_phone})`);
+
     const variables = {
         "1": customer_name
     };
@@ -1251,6 +1382,8 @@ app.post('/send-driver-rejected', async (req, res) => {
 // ============================================================
 app.post('/send-no-driver', async (req, res) => {
     const { customer_phone, customer_name, total_amount } = req.body;
+
+    console.log(`\n📋 [SEND-NO-DRIVER] To: ${customer_name} (${customer_phone})`);
 
     const variables = {
         "1": customer_name,
@@ -1273,6 +1406,8 @@ app.post('/send-no-driver', async (req, res) => {
 app.get('/driver/accept/:orderId', async (req, res) => {
     const { orderId } = req.params;
     const confirmation = driverConfirmations.get(orderId);
+
+    console.log(`\n📋 [DRIVER-ACCEPT] Order: ${orderId}, Status: ${confirmation?.status || 'not found'}`);
 
     if (confirmation && confirmation.status === 'pending' && Date.now() < confirmation.expiresAt) {
         confirmation.status = 'accepted';
@@ -1377,6 +1512,8 @@ app.get('/driver/reject/:orderId', async (req, res) => {
     const { orderId } = req.params;
     const confirmation = driverConfirmations.get(orderId);
 
+    console.log(`\n📋 [DRIVER-REJECT] Order: ${orderId}, Status: ${confirmation?.status || 'not found'}`);
+
     if (confirmation && confirmation.status === 'pending' && Date.now() < confirmation.expiresAt) {
         confirmation.status = 'rejected';
         confirmation.rejectedAt = Date.now();
@@ -1442,7 +1579,7 @@ app.get('/driver/reject/:orderId', async (req, res) => {
 // ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
 // ============================================================
 app.post('/webhook/whatsapp', async (req, res) => {
-    console.log('📨 [WEBHOOK] Received:', JSON.stringify(req.body, null, 2));
+    console.log('\n📨 [WEBHOOK] Received:', JSON.stringify(req.body, null, 2));
 
     const { Body, From, MessageSid, ProfileName } = req.body;
     const driverPhone = From ? From.replace('whatsapp:', '') : '';
@@ -1518,10 +1655,13 @@ app.get('/check-confirmation/:orderId', async (req, res) => {
     const { orderId } = req.params;
     const confirmation = driverConfirmations.get(orderId);
 
+    console.log(`\n📋 [CHECK-CONFIRMATION] Order: ${orderId}, Status: ${confirmation?.status || 'not found'}`);
+
     if (confirmation) {
         if (confirmation.status === 'pending' && Date.now() > confirmation.expiresAt) {
             confirmation.status = 'timeout';
             driverConfirmations.set(orderId, confirmation);
+            console.log(`⏰ Order ${orderId} timed out`);
         }
         res.json({
             status: confirmation.status,
@@ -1540,6 +1680,8 @@ app.get('/check-confirmation/:orderId', async (req, res) => {
 app.post('/send-whatsapp', async (req, res) => {
     const { to, message, use_template, template_sid, variables } = req.body;
 
+    console.log(`\n📋 [SEND-WHATSAPP] To: ${to}, use_template: ${use_template}`);
+
     let result;
     if (use_template && template_sid) {
         result = await sendWhatsAppTemplate(to, template_sid, variables || {});
@@ -1554,12 +1696,15 @@ app.post('/send-whatsapp', async (req, res) => {
 // ENDPOINT: GET /health
 // ============================================================
 app.get('/health', (req, res) => {
+    console.log(`\n💚 [HEALTH] Health check at ${new Date().toISOString()}`);
+
     res.json({
         status: 'OK',
         timestamp: new Date().toISOString(),
         database_ready: dbReady,
         uptime: process.uptime(),
         twilio_configured: !!(CONFIG.twilioSid && CONFIG.twilioAuth),
+        twilio_client_ready: !!twilioClient,
         templates: {
             driver_confirmation: CONFIG.templateDriverConfirmation,
             driver_order_accepted: CONFIG.templateDriverOrderAccepted,
@@ -1582,6 +1727,8 @@ app.listen(PORT, () => {
     console.log('');
     console.log('📌 Endpoints:');
     console.log(`   GET  /health`);
+    console.log(`   GET  /test-twilio`);
+    console.log(`   GET  /test-twilio?send=true&to=628123456789`);
     console.log(`   POST /adjust.php`);
     console.log(`   POST /create-va`);
     console.log(`   POST /create-qris`);
