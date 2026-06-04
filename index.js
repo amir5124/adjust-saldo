@@ -1687,36 +1687,47 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 // ============================================================
 // FUNGSI KIRIM DETAIL ORDER KE DRIVER
 // ============================================================
+// ============================================================
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER
+// ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
 
-    // Ambil detail order dari database
-    const [orders] = await pool.execute(
-        'SELECT * FROM orders WHERE order_id = ?',
-        [orderId]
-    );
+    try {
+        // Ambil detail order dari database
+        const [orders] = await pool.execute(
+            'SELECT * FROM orders WHERE order_id = ?',
+            [orderId]
+        );
 
-    if (orders.length === 0) {
-        console.error(`Order ${orderId} not found in database`);
-        return;
+        if (orders.length === 0) {
+            console.log(`⚠️ Order ${orderId} not found in database yet, skipping detail send`);
+            console.log(`   Driver will receive details later when order is saved`);
+            return;
+        }
+
+        const order = orders[0];
+
+        const variables = {
+            "1": confirmation.driver_name,
+            "2": order.customer_name,
+            "3": order.customer_phone,
+            "4": orderId,
+            "5": "Detail pesanan: " + (order.order_note || '-'),
+            "6": formatRupiah(order.total_price)
+        };
+
+        await sendWhatsAppTemplate(
+            confirmation.driver_phone,
+            CONFIG.templateDriverOrderAccepted,
+            variables
+        );
+
+        console.log(`✅ Order details sent to driver`);
+
+    } catch (error) {
+        console.error(`❌ Error sending order details:`, error.message);
     }
-
-    const order = orders[0];
-
-    const variables = {
-        "1": confirmation.driver_name,
-        "2": order.customer_name,
-        "3": order.customer_phone,
-        "4": orderId,
-        "5": "Detail pesanan: " + (order.order_note || '-'),
-        "6": formatRupiah(order.total_price)
-    };
-
-    await sendWhatsAppTemplate(
-        confirmation.driver_phone,
-        CONFIG.templateDriverOrderAccepted,
-        variables
-    );
 }
 
 // ============================================================
@@ -1725,29 +1736,39 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 async function notifyCustomerOrderAccepted(orderId, confirmation) {
     console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
 
-    const [orders] = await pool.execute(
-        'SELECT * FROM orders WHERE order_id = ?',
-        [orderId]
-    );
+    try {
+        const [orders] = await pool.execute(
+            'SELECT * FROM orders WHERE order_id = ?',
+            [orderId]
+        );
 
-    if (orders.length === 0) return;
+        if (orders.length === 0) {
+            console.log(`⚠️ Order ${orderId} not found in database yet, skipping customer notification`);
+            return;
+        }
 
-    const order = orders[0];
+        const order = orders[0];
 
-    const variables = {
-        "1": order.customer_name,
-        "2": confirmation.driver_name,
-        "3": confirmation.driver_phone,
-        "4": orderId,
-        "5": "Pesanan Anda sedang diproses oleh driver",
-        "6": formatRupiah(order.total_price)
-    };
+        const variables = {
+            "1": order.customer_name,
+            "2": confirmation.driver_name,
+            "3": confirmation.driver_phone,
+            "4": orderId,
+            "5": "Pesanan Anda sedang diproses oleh driver",
+            "6": formatRupiah(order.total_price)
+        };
 
-    await sendWhatsAppTemplate(
-        order.customer_phone,
-        CONFIG.templateCustomerOrderConfirmed,
-        variables
-    );
+        await sendWhatsAppTemplate(
+            order.customer_phone,
+            CONFIG.templateCustomerOrderConfirmed,
+            variables
+        );
+
+        console.log(`✅ Customer notification sent to ${order.customer_phone}`);
+
+    } catch (error) {
+        console.error(`❌ Error sending customer notification:`, error.message);
+    }
 }
 // ============================================================
 // ENDPOINT: GET /check-confirmation/:orderId
