@@ -1605,6 +1605,9 @@ app.get('/driver/reject/:orderId', async (req, res) => {
 // ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
 // ============================================================
 // Perbaiki endpoint webhook untuk menerima kedua format
+// ============================================================
+// ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
+// ============================================================
 app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
     console.log('\n📨 [WEBHOOK] ============================================');
     console.log('📨 [WEBHOOK] Content-Type:', req.headers['content-type']);
@@ -1618,7 +1621,6 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         return res.sendStatus(400);
     }
 
-    // NORMALISASI NOMOR DRIVER
     const rawDriverPhone = fromNumber.replace('whatsapp:', '');
     const driverPhone = normalizePhoneNumber(rawDriverPhone);
     const message = messageBody.trim().toUpperCase();
@@ -1626,15 +1628,11 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     console.log(`📱 Raw from: ${rawDriverPhone} -> Normalized: ${driverPhone}`);
     console.log(`📱 Message: ${message}`);
 
-    // Cari order pending dengan nomor yang sudah dinormalisasi
+    // Cari order pending
     let foundOrderId = null;
     let foundConfirmation = null;
 
-    console.log(`🔍 Looking for driver with phone: ${driverPhone}`);
-    console.log(`📊 Current driverConfirmations size: ${driverConfirmations.size}`);
-
     for (const [orderId, confirmation] of driverConfirmations) {
-        console.log(`   Checking: ${orderId} -> ${confirmation.driver_phone} (${confirmation.status})`);
         if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
             foundOrderId = orderId;
             foundConfirmation = confirmation;
@@ -1645,19 +1643,23 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     if (foundOrderId && foundConfirmation) {
         console.log(`✅ Found pending order ${foundOrderId}`);
 
+        // CEK UNTUK ACCEPT - Masukkan "ACCEPT" karena itu yang dikirim Twilio!
         if (message === 'ACCEPT' || message === 'TERIMA' || message === 'SETUJU' || message === 'YES' || message === 'YA') {
             foundConfirmation.status = 'accepted';
             foundConfirmation.acceptedAt = Date.now();
             driverConfirmations.set(foundOrderId, foundConfirmation);
             console.log(`✅ Driver ACCEPTED order ${foundOrderId}`);
 
+            // Kirim respon ke driver
             await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
 
-            // Panggil fungsi kirim detail order
+            // Kirim detail order
             await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
             await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
 
-        } else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
+        }
+        // CEK UNTUK REJECT - Masukkan "REJECT" karena itu yang dikirim Twilio!
+        else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
             foundConfirmation.status = 'rejected';
             foundConfirmation.rejectedAt = Date.now();
             driverConfirmations.set(foundOrderId, foundConfirmation);
@@ -1670,13 +1672,15 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
                 CONFIG.templateDriverRejected,
                 { "1": foundConfirmation.customer_name }
             );
+        } else {
+            console.log(`⚠️ Unknown message: ${message}`);
         }
     } else {
         console.log(`⚠️ No pending order found for driver ${driverPhone}`);
-        // Tampilkan semua driver yang pending untuk debugging
+        // Debug: tampilkan semua pending order
         for (const [orderId, confirmation] of driverConfirmations) {
             if (confirmation.status === 'pending') {
-                console.log(`   Pending order: ${orderId} -> driver: ${confirmation.driver_phone}`);
+                console.log(`   Pending: ${orderId} -> driver: ${confirmation.driver_phone}`);
             }
         }
     }
