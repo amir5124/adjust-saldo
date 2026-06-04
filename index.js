@@ -211,6 +211,28 @@ function generateSignatureQRIS(p) {
 }
 
 // ============================================================
+// NORMALIZE PHONE NUMBER (BEFORE STORING AND COMPARING)
+// ============================================================
+function normalizePhoneNumber(phoneNumber) {
+    if (!phoneNumber) return null;
+
+    // Hapus semua karakter non-digit
+    let cleaned = phoneNumber.toString().replace(/\D/g, '');
+
+    // Jika dimulai dengan 0, ganti dengan 62
+    if (cleaned.startsWith('0')) {
+        cleaned = '62' + cleaned.substring(1);
+    }
+
+    // Jika tidak dimulai dengan 62, tambahkan 62
+    if (!cleaned.startsWith('62')) {
+        cleaned = '62' + cleaned;
+    }
+
+    return cleaned;
+}
+
+// ============================================================
 // HELPER: Panggil Jagel API (app.jagel.id — Bearer token)
 // ============================================================
 async function callJagelAppApi(url, bearerToken, method = 'GET', data = null) {
@@ -1272,12 +1294,16 @@ app.get('/drivers', async (req, res) => {
 app.post('/driver-confirmation', async (req, res) => {
     const { order_id, driver_id, driver_name, driver_phone, customer_name, total_amount, jumlah_toko } = req.body;
 
+    // NORMALISASI NOMOR DRIVER
+    const normalizedDriverPhone = normalizePhoneNumber(driver_phone);
+
     console.log(`\n📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
+    console.log(`   Original phone: ${driver_phone} -> Normalized: ${normalizedDriverPhone}`);
 
     driverConfirmations.set(order_id, {
         driver_id,
         driver_name,
-        driver_phone,
+        driver_phone: normalizedDriverPhone,  // Simpan dalam format normal
         customer_name,
         total_amount,
         jumlah_toko,
@@ -1584,30 +1610,31 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     console.log('📨 [WEBHOOK] Content-Type:', req.headers['content-type']);
     console.log('📨 [WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
 
-    // Support both JSON and urlencoded
-    let body = req.body;
-    let rawBody = req.body;
-
-    // Twilio biasanya mengirim sebagai urlencoded
-    const messageBody = rawBody.Body || rawBody.body;
-    const fromNumber = rawBody.From || rawBody.from;
-    const messageSid = rawBody.MessageSid || rawBody.messageSid;
+    const messageBody = req.body.Body || req.body.body;
+    const fromNumber = req.body.From || req.body.from;
 
     if (!messageBody || !fromNumber) {
         console.error('❌ Missing required fields');
         return res.sendStatus(400);
     }
 
-    const driverPhone = fromNumber.replace('whatsapp:', '');
+    // NORMALISASI NOMOR DRIVER
+    const rawDriverPhone = fromNumber.replace('whatsapp:', '');
+    const driverPhone = normalizePhoneNumber(rawDriverPhone);
     const message = messageBody.trim().toUpperCase();
 
-    console.log(`📱 From: ${driverPhone}, Message: ${message}`);
+    console.log(`📱 Raw from: ${rawDriverPhone} -> Normalized: ${driverPhone}`);
+    console.log(`📱 Message: ${message}`);
 
-    // Cari order pending
+    // Cari order pending dengan nomor yang sudah dinormalisasi
     let foundOrderId = null;
     let foundConfirmation = null;
 
+    console.log(`🔍 Looking for driver with phone: ${driverPhone}`);
+    console.log(`📊 Current driverConfirmations size: ${driverConfirmations.size}`);
+
     for (const [orderId, confirmation] of driverConfirmations) {
+        console.log(`   Checking: ${orderId} -> ${confirmation.driver_phone} (${confirmation.status})`);
         if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
             foundOrderId = orderId;
             foundConfirmation = confirmation;
@@ -1616,7 +1643,7 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     }
 
     if (foundOrderId && foundConfirmation) {
-        console.log(`🔍 Found pending order ${foundOrderId}`);
+        console.log(`✅ Found pending order ${foundOrderId}`);
 
         if (message === 'ACCEPT' || message === 'TERIMA' || message === 'SETUJU' || message === 'YES' || message === 'YA') {
             foundConfirmation.status = 'accepted';
@@ -1624,10 +1651,9 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
             driverConfirmations.set(foundOrderId, foundConfirmation);
             console.log(`✅ Driver ACCEPTED order ${foundOrderId}`);
 
-            // Kirim respon ke driver
-            await sendWhatsAppFreeForm(driverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
+            await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
 
-            // Kirim detail order (panggil fungsi yang sudah ada)
+            // Panggil fungsi kirim detail order
             await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
             await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
 
@@ -1637,9 +1663,8 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
             driverConfirmations.set(foundOrderId, foundConfirmation);
             console.log(`❌ Driver REJECTED order ${foundOrderId}`);
 
-            await sendWhatsAppFreeForm(driverPhone, '❌ Pesanan ditolak. Terima kasih.');
+            await sendWhatsAppFreeForm(rawDriverPhone, '❌ Pesanan ditolak. Terima kasih.');
 
-            // Notifikasi customer
             await sendWhatsAppTemplate(
                 foundConfirmation.customer_phone,
                 CONFIG.templateDriverRejected,
@@ -1648,11 +1673,82 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         }
     } else {
         console.log(`⚠️ No pending order found for driver ${driverPhone}`);
+        // Tampilkan semua driver yang pending untuk debugging
+        for (const [orderId, confirmation] of driverConfirmations) {
+            if (confirmation.status === 'pending') {
+                console.log(`   Pending order: ${orderId} -> driver: ${confirmation.driver_phone}`);
+            }
+        }
     }
 
     res.sendStatus(200);
 });
 
+// ============================================================
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER
+// ============================================================
+async function sendOrderDetailsToDriver(orderId, confirmation) {
+    console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
+
+    // Ambil detail order dari database
+    const [orders] = await pool.execute(
+        'SELECT * FROM orders WHERE order_id = ?',
+        [orderId]
+    );
+
+    if (orders.length === 0) {
+        console.error(`Order ${orderId} not found in database`);
+        return;
+    }
+
+    const order = orders[0];
+
+    const variables = {
+        "1": confirmation.driver_name,
+        "2": order.customer_name,
+        "3": order.customer_phone,
+        "4": orderId,
+        "5": "Detail pesanan: " + (order.order_note || '-'),
+        "6": formatRupiah(order.total_price)
+    };
+
+    await sendWhatsAppTemplate(
+        confirmation.driver_phone,
+        CONFIG.templateDriverOrderAccepted,
+        variables
+    );
+}
+
+// ============================================================
+// FUNGSI NOTIFIKASI KE CUSTOMER
+// ============================================================
+async function notifyCustomerOrderAccepted(orderId, confirmation) {
+    console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
+
+    const [orders] = await pool.execute(
+        'SELECT * FROM orders WHERE order_id = ?',
+        [orderId]
+    );
+
+    if (orders.length === 0) return;
+
+    const order = orders[0];
+
+    const variables = {
+        "1": order.customer_name,
+        "2": confirmation.driver_name,
+        "3": confirmation.driver_phone,
+        "4": orderId,
+        "5": "Pesanan Anda sedang diproses oleh driver",
+        "6": formatRupiah(order.total_price)
+    };
+
+    await sendWhatsAppTemplate(
+        order.customer_phone,
+        CONFIG.templateCustomerOrderConfirmed,
+        variables
+    );
+}
 // ============================================================
 // ENDPOINT: GET /check-confirmation/:orderId
 // ============================================================
