@@ -39,6 +39,12 @@ const CONFIG = {
     adminWaNumber: process.env.ADMIN_WHATSAPP_NUMBER || 'whatsapp:+6282323907426',
     csNumber: process.env.CS_PHONE_NUMBER || '6282226666610',
     baseUrl: process.env.BASE_URL || 'http://localhost:3000',
+    // Twilio Content Template SIDs (Approved)
+    templateDriverConfirmation: process.env.TWILIO_TEMPLATE_DRIVER_CONFIRMATION || 'HX0f899a4bc82aca9611ef757228c3ba61',
+    templateDriverOrderAccepted: process.env.TWILIO_TEMPLATE_DRIVER_ACCEPTED || 'HX59e4eb4a2e31316585b76a3fbb2bfc8d',
+    templateCustomerOrderConfirmed: process.env.TWILIO_TEMPLATE_CUSTOMER_CONFIRMED || 'HX9e996a15a5f28fb3ec2cdd7d84ab85a2',
+    templateDriverRejected: process.env.TWILIO_TEMPLATE_DRIVER_REJECTED || 'HX883e49ca163a114e5674f0be7dd53bec',
+    templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da'
 };
 
 // ============================================================
@@ -275,7 +281,7 @@ async function addBalance(amount, customer_name, methodCode, serialnumber) {
 }
 
 // ============================================================
-// TWILIO HELPER FUNCTIONS
+// TWILIO HELPER FUNCTIONS WITH CONTENT TEMPLATE
 // ============================================================
 let twilioClient = null;
 
@@ -287,23 +293,60 @@ function initTwilio() {
     return twilioClient;
 }
 
-async function sendWhatsAppMessage(to, message) {
-    const client = initTwilio();
-
-    let phoneNumber = to.toString().replace(/\D/g, '');
-    if (!phoneNumber.startsWith('62')) {
-        if (phoneNumber.startsWith('0')) {
-            phoneNumber = '62' + phoneNumber.substring(1);
+// Format phone number to WhatsApp format
+function formatWhatsAppNumber(phoneNumber) {
+    let cleaned = phoneNumber.toString().replace(/\D/g, '');
+    if (!cleaned.startsWith('62')) {
+        if (cleaned.startsWith('0')) {
+            cleaned = '62' + cleaned.substring(1);
         } else {
-            phoneNumber = '62' + phoneNumber;
+            cleaned = '62' + cleaned;
         }
     }
-    const whatsappTo = `whatsapp:${phoneNumber}`;
+    return `whatsapp:${cleaned}`;
+}
 
-    console.log(`📱 Sending WhatsApp to: ${whatsappTo}`);
+// Send WhatsApp message using Content Template (for business-initiated)
+async function sendWhatsAppTemplate(to, templateSid, variables) {
+    const client = initTwilio();
+    const whatsappTo = formatWhatsAppNumber(to);
+
+    console.log(`📱 [TEMPLATE] Sending to: ${whatsappTo}`);
+    console.log(`   Template SID: ${templateSid}`);
+    console.log(`   Variables:`, variables);
 
     if (!client) {
-        console.log('⚠️ [MOCK] WhatsApp message:', { to: whatsappTo, message: message.substring(0, 100) });
+        console.log('⚠️ [MOCK] WhatsApp template would be sent:', { to: whatsappTo, templateSid, variables });
+        return { success: true, mock: true };
+    }
+
+    try {
+        const result = await client.messages.create({
+            from: CONFIG.twilioWaNumber,
+            to: whatsappTo,
+            contentSid: templateSid,
+            contentVariables: JSON.stringify(variables)
+        });
+        console.log(`✅ Template sent, SID: ${result.sid}`);
+        return { success: true, sid: result.sid };
+    } catch (error) {
+        console.error('❌ Twilio template error:', error.message);
+        if (error.code === 63016) {
+            console.error('   ⚠️ Template not approved or invalid Content SID!');
+        }
+        return { success: false, error: error.message, code: error.code };
+    }
+}
+
+// Send free-form message (ONLY for replies within 24-hour window)
+async function sendWhatsAppFreeForm(to, message) {
+    const client = initTwilio();
+    const whatsappTo = formatWhatsAppNumber(to);
+
+    console.log(`📱 [FREE-FORM] Sending to: ${whatsappTo}`);
+
+    if (!client) {
+        console.log('⚠️ [MOCK] Free-form message:', { to: whatsappTo, message: message.substring(0, 100) });
         return { success: true, mock: true };
     }
 
@@ -313,12 +356,21 @@ async function sendWhatsAppMessage(to, message) {
             to: whatsappTo,
             body: message
         });
-        console.log(`✅ WhatsApp sent, SID: ${result.sid}`);
+        console.log(`✅ Free-form sent, SID: ${result.sid}`);
         return { success: true, sid: result.sid };
     } catch (error) {
-        console.error('❌ Twilio error:', error.message);
+        console.error('❌ Free-form error:', error.message);
         return { success: false, error: error.message };
     }
+}
+
+// Format Rupiah
+function formatRupiah(amount) {
+    return new Intl.NumberFormat('id-ID', {
+        style: 'currency',
+        currency: 'IDR',
+        minimumFractionDigits: 0
+    }).format(amount);
 }
 
 // ============================================================
@@ -580,14 +632,6 @@ app.post('/create-qris', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /callback
 // ============================================================
-// ============================================================
-// ENDPOINT: POST /callback (DIPERBAIKI)
-// ============================================================
-let tableName = null;
-let dbData = null;
-// ============================================================
-// ENDPOINT: POST /callback
-// ============================================================
 app.post('/callback', async (req, res) => {
     console.log('\n📞 [CALLBACK] ============================================');
     console.log('📞 [CALLBACK] Payload:', JSON.stringify(req.body, null, 2));
@@ -693,6 +737,7 @@ app.post('/callback', async (req, res) => {
         console.log(`🔓 [CALLBACK] Connection released for ${partner_reff}`);
     }
 });
+
 // ============================================================
 // ENDPOINT: GET /download-qr/:partner_reff
 // ============================================================
@@ -1112,51 +1157,133 @@ app.get('/drivers', async (req, res) => {
 });
 
 // ============================================================
-// ENDPOINT: POST /driver-confirmation
+// ENDPOINT: POST /driver-confirmation (USING TEMPLATE)
 // ============================================================
 app.post('/driver-confirmation', async (req, res) => {
     const { order_id, driver_id, driver_name, driver_phone, customer_name, total_amount, jumlah_toko } = req.body;
+
+    console.log(`📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
 
     driverConfirmations.set(order_id, {
         driver_id,
         driver_name,
         driver_phone,
+        customer_name,
+        total_amount,
+        jumlah_toko,
         status: 'pending',
         timestamp: Date.now(),
         expiresAt: Date.now() + (3 * 60 * 1000)
     });
 
-    const confirmationMessage = `🍽️ *Permintaan Konfirmasi Pesanan*
-━━━━━━━━━━━━━━━━━━━━━
-Halo *${driver_name}*,
+    // Send using Quick Reply Template
+    const variables = {
+        "1": driver_name,
+        "2": customer_name,
+        "3": total_amount,
+        "4": jumlah_toko.toString()
+    };
 
-Ada pesanan baru yang membutuhkan driver!
+    const result = await sendWhatsAppTemplate(
+        driver_phone,
+        CONFIG.templateDriverConfirmation,
+        variables
+    );
 
-👤 *Customer: ${customer_name}*
-💰 *Total: ${total_amount}*
-📦 *${jumlah_toko} toko*
+    if (result.success) {
+        console.log(`✅ Confirmation sent to driver ${driver_name}`);
+    } else {
+        console.error(`❌ Failed to send confirmation to driver ${driver_name}`);
+    }
 
-⏰ *Waktu respon: 3 menit*
+    res.json({ success: result.success, order_id, ...result });
+});
 
-━━━━━━━━━━━━━━━━━━━━━
-*PILIH OPSI BERIKUT:*
+// ============================================================
+// ENDPOINT: POST /send-order-details (USING TEMPLATE)
+// ============================================================
+app.post('/send-order-details', async (req, res) => {
+    const { order_id, driver_phone, driver_name, customer_name, customer_phone, stores_detail, subtotal, total_ongkir, total, order_note } = req.body;
 
-✅ *SETUJU* - Untuk menerima pesanan ini
-❌ *TOLAK* - Untuk menolak pesanan ini
-━━━━━━━━━━━━━━━━━━━━━
+    console.log(`📦 [SEND-ORDER-DETAILS] Order: ${order_id}`);
 
-Klik link di bawah untuk merespon:
-✅ ${CONFIG.baseUrl}/driver/accept/${order_id}
-❌ ${CONFIG.baseUrl}/driver/reject/${order_id}
+    // Send to Driver using template
+    const driverVariables = {
+        "1": driver_name,
+        "2": customer_name,
+        "3": customer_phone,
+        "4": order_id,
+        "5": stores_detail || 'Detail pesanan terlampir',
+        "6": total
+    };
 
-Atau balas dengan:
-- Ketik "SETUJU" untuk menerima
-- Ketik "TOLAK" untuk menolak
+    const driverResult = await sendWhatsAppTemplate(
+        driver_phone,
+        CONFIG.templateDriverOrderAccepted,
+        driverVariables
+    );
 
-Terima kasih! 🙏`;
+    // Send to Customer using template
+    const customerVariables = {
+        "1": customer_name,
+        "2": driver_name,
+        "3": driver_phone,
+        "4": order_id,
+        "5": stores_detail || 'Detail pesanan terlampir',
+        "6": total
+    };
 
-    const result = await sendWhatsAppMessage(driver_phone, confirmationMessage);
-    res.json({ success: true, ...result });
+    const customerResult = await sendWhatsAppTemplate(
+        customer_phone,
+        CONFIG.templateCustomerOrderConfirmed,
+        customerVariables
+    );
+
+    res.json({
+        success: driverResult.success && customerResult.success,
+        driver: driverResult,
+        customer: customerResult
+    });
+});
+
+// ============================================================
+// ENDPOINT: POST /send-driver-rejected (USING TEMPLATE)
+// ============================================================
+app.post('/send-driver-rejected', async (req, res) => {
+    const { customer_phone, customer_name } = req.body;
+
+    const variables = {
+        "1": customer_name
+    };
+
+    const result = await sendWhatsAppTemplate(
+        customer_phone,
+        CONFIG.templateDriverRejected,
+        variables
+    );
+
+    res.json({ success: result.success, ...result });
+});
+
+// ============================================================
+// ENDPOINT: POST /send-no-driver (USING TEMPLATE)
+// ============================================================
+app.post('/send-no-driver', async (req, res) => {
+    const { customer_phone, customer_name, total_amount } = req.body;
+
+    const variables = {
+        "1": customer_name,
+        "2": total_amount,
+        "3": CONFIG.csNumber
+    };
+
+    const result = await sendWhatsAppTemplate(
+        customer_phone,
+        CONFIG.templateNoDriverAvailable,
+        variables
+    );
+
+    res.json({ success: result.success, ...result });
 });
 
 // ============================================================
@@ -1172,27 +1299,89 @@ app.get('/driver/accept/:orderId', async (req, res) => {
         driverConfirmations.set(orderId, confirmation);
 
         res.send(`
+            <!DOCTYPE html>
             <html>
-            <head><meta charset="UTF-8"></head>
-            <body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;">
-                <div style="text-align:center;">
-                    <div style="font-size:64px;">✅</div>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Pesanan Diterima</title>
+                <style>
+                    body {
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                        margin: 0;
+                        padding: 20px;
+                    }
+                    .card {
+                        background: white;
+                        border-radius: 20px;
+                        padding: 40px;
+                        text-align: center;
+                        max-width: 400px;
+                        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                    }
+                    .icon { font-size: 80px; margin-bottom: 20px; }
+                    h2 { color: #10b981; margin-bottom: 10px; }
+                    p { color: #666; margin-bottom: 20px; }
+                    .order-id {
+                        background: #f3f4f6;
+                        padding: 10px;
+                        border-radius: 10px;
+                        font-family: monospace;
+                        margin: 20px 0;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="icon">✅</div>
                     <h2>Pesanan Diterima!</h2>
                     <p>Terima kasih telah menerima pesanan.</p>
+                    <div class="order-id">Order ID: ${orderId}</div>
                     <p>Detail pesanan akan dikirimkan segera ke WhatsApp Anda.</p>
-                    <script>setTimeout(() => window.close(), 3000);</script>
+                    <small>Halaman ini akan ditutup dalam 5 detik...</small>
                 </div>
+                <script>setTimeout(() => window.close(), 5000);</script>
             </body>
             </html>
         `);
     } else {
         res.send(`
+            <!DOCTYPE html>
             <html>
-            <body style="display:flex;justify-content:center;align-items:center;height:100vh;">
-                <div style="text-align:center;">
-                    <div style="font-size:64px;">⏰</div>
+            <head>
+                <meta charset="UTF-8">
+                <title>Konfirmasi Kadaluwarsa</title>
+                <style>
+                    body {
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        font-family: sans-serif;
+                        background: #fef2f2;
+                        margin: 0;
+                    }
+                    .card {
+                        background: white;
+                        border-radius: 20px;
+                        padding: 40px;
+                        text-align: center;
+                        max-width: 400px;
+                    }
+                    .icon { font-size: 80px; }
+                    h2 { color: #ef4444; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="icon">⏰</div>
                     <h2>Konfirmasi Kadaluwarsa</h2>
-                    <p>Pesanan ini sudah tidak tersedia.</p>
+                    <p>Pesanan ini sudah tidak tersedia atau sudah kadaluwarsa.</p>
                 </div>
             </body>
             </html>
@@ -1213,20 +1402,48 @@ app.get('/driver/reject/:orderId', async (req, res) => {
         driverConfirmations.set(orderId, confirmation);
 
         res.send(`
+            <!DOCTYPE html>
             <html>
-            <body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;">
-                <div style="text-align:center;">
-                    <div style="font-size:64px;">❌</div>
+            <head>
+                <meta charset="UTF-8">
+                <title>Pesanan Ditolak</title>
+                <style>
+                    body {
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        font-family: sans-serif;
+                        background: #fef2f2;
+                        margin: 0;
+                    }
+                    .card {
+                        background: white;
+                        border-radius: 20px;
+                        padding: 40px;
+                        text-align: center;
+                        max-width: 400px;
+                    }
+                    .icon { font-size: 80px; }
+                    h2 { color: #ef4444; margin-bottom: 10px; }
+                    p { color: #666; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="icon">❌</div>
                     <h2>Pesanan Ditolak</h2>
                     <p>Terima kasih sudah memberitahu.</p>
                     <p>Pesanan akan dialihkan ke driver lain.</p>
-                    <script>setTimeout(() => window.close(), 3000);</script>
+                    <small>Halaman ini akan ditutup...</small>
                 </div>
+                <script>setTimeout(() => window.close(), 3000);</script>
             </body>
             </html>
         `);
     } else {
         res.send(`
+            <!DOCTYPE html>
             <html>
             <body style="display:flex;justify-content:center;align-items:center;height:100vh;">
                 <div style="text-align:center;">
@@ -1241,33 +1458,73 @@ app.get('/driver/reject/:orderId', async (req, res) => {
 });
 
 // ============================================================
-// ENDPOINT: POST /webhook/whatsapp (Twilio Webhook)
+// ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
 // ============================================================
 app.post('/webhook/whatsapp', async (req, res) => {
-    const { Body, From } = req.body;
-    const driverPhone = From.replace('whatsapp:', '');
-    const message = Body.trim().toUpperCase();
+    console.log('📨 [WEBHOOK] Received:', JSON.stringify(req.body, null, 2));
+
+    const { Body, From, MessageSid, ProfileName } = req.body;
+    const driverPhone = From ? From.replace('whatsapp:', '') : '';
+    const message = Body ? Body.trim().toUpperCase() : '';
+
+    console.log(`📱 From: ${driverPhone}, Message: ${message}`);
 
     let foundOrderId = null;
+    let foundConfirmation = null;
+
+    // Cari order pending untuk driver ini
     for (const [orderId, confirmation] of driverConfirmations) {
         if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
             foundOrderId = orderId;
+            foundConfirmation = confirmation;
             break;
         }
     }
 
-    if (foundOrderId) {
-        const confirmation = driverConfirmations.get(foundOrderId);
+    if (foundOrderId && foundConfirmation) {
+        console.log(`🔍 Found pending order ${foundOrderId} for driver ${driverPhone}`);
 
-        if (message === 'SETUJU' || message === 'YES' || message === 'YA') {
-            confirmation.status = 'accepted';
-            driverConfirmations.set(foundOrderId, confirmation);
-            await sendWhatsAppMessage(driverPhone, '✅ Pesanan diterima! Detail akan dikirimkan segera.');
-        } else if (message === 'TOLAK' || message === 'NO' || message === 'REJECT') {
-            confirmation.status = 'rejected';
-            driverConfirmations.set(foundOrderId, confirmation);
-            await sendWhatsAppMessage(driverPhone, '❌ Pesanan ditolak. Terima kasih.');
+        // Handle ACCEPT (TERIMA)
+        if (message === 'ACCEPT' || message === 'TERIMA' || message === 'SETUJU' || message === 'YES' || message === 'YA') {
+            foundConfirmation.status = 'accepted';
+            foundConfirmation.acceptedAt = Date.now();
+            driverConfirmations.set(foundOrderId, foundConfirmation);
+
+            console.log(`✅ Driver ACCEPTED order ${foundOrderId}`);
+
+            // Send free-form reply to driver (within 24h window)
+            await sendWhatsAppFreeForm(driverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
+
+            // Trigger order details to be sent
+            res.json({ action: 'accepted', order_id: foundOrderId, confirmation: foundConfirmation });
+
+            // Handle REJECT (TOLAK)
+        } else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
+            foundConfirmation.status = 'rejected';
+            foundConfirmation.rejectedAt = Date.now();
+            driverConfirmations.set(foundOrderId, foundConfirmation);
+
+            console.log(`❌ Driver REJECTED order ${foundOrderId}`);
+
+            // Send free-form reply to driver
+            await sendWhatsAppFreeForm(driverPhone, '❌ Pesanan ditolak. Terima kasih sudah memberitahu.');
+
+            // Send notification to customer using template
+            await sendWhatsAppTemplate(
+                foundConfirmation.customer_phone,
+                CONFIG.templateDriverRejected,
+                { "1": foundConfirmation.customer_name }
+            );
+
+            res.json({ action: 'rejected', order_id: foundOrderId });
+
+        } else {
+            console.log(`⚠️ Unknown response: ${message}`);
+            res.json({ action: 'unknown', message });
         }
+    } else {
+        console.log(`⚠️ No pending order found for driver ${driverPhone}`);
+        res.json({ action: 'not_found' });
     }
 
     res.sendStatus(200);
@@ -1297,20 +1554,18 @@ app.get('/check-confirmation/:orderId', async (req, res) => {
 });
 
 // ============================================================
-// ENDPOINT: POST /send-order-details
-// ============================================================
-app.post('/send-order-details', async (req, res) => {
-    const { to, message } = req.body;
-    const result = await sendWhatsAppMessage(to, message);
-    res.json({ success: true, ...result });
-});
-
-// ============================================================
-// ENDPOINT: POST /send-whatsapp (general)
+// ENDPOINT: POST /send-whatsapp (general - FREE FORM ONLY FOR REPLIES)
 // ============================================================
 app.post('/send-whatsapp', async (req, res) => {
-    const { to, message } = req.body;
-    const result = await sendWhatsAppMessage(to, message);
+    const { to, message, use_template, template_sid, variables } = req.body;
+
+    let result;
+    if (use_template && template_sid) {
+        result = await sendWhatsAppTemplate(to, template_sid, variables || {});
+    } else {
+        result = await sendWhatsAppFreeForm(to, message);
+    }
+
     res.json(result);
 });
 
@@ -1324,6 +1579,13 @@ app.get('/health', (req, res) => {
         database_ready: dbReady,
         uptime: process.uptime(),
         twilio_configured: !!(CONFIG.twilioSid && CONFIG.twilioAuth),
+        templates: {
+            driver_confirmation: CONFIG.templateDriverConfirmation,
+            driver_order_accepted: CONFIG.templateDriverOrderAccepted,
+            customer_order_confirmed: CONFIG.templateCustomerOrderConfirmed,
+            driver_rejected: CONFIG.templateDriverRejected,
+            no_driver_available: CONFIG.templateNoDriverAvailable
+        }
     });
 });
 
@@ -1352,11 +1614,20 @@ app.listen(PORT, () => {
     console.log(`   PUT  /orders/:order_id`);
     console.log(`   GET  /drivers?bearer_token=xxx`);
     console.log(`   POST /driver-confirmation`);
+    console.log(`   POST /send-order-details`);
+    console.log(`   POST /send-driver-rejected`);
+    console.log(`   POST /send-no-driver`);
     console.log(`   GET  /driver/accept/:orderId`);
     console.log(`   GET  /driver/reject/:orderId`);
     console.log(`   POST /webhook/whatsapp`);
     console.log(`   GET  /check-confirmation/:orderId`);
-    console.log(`   POST /send-order-details`);
     console.log(`   POST /send-whatsapp`);
+    console.log('');
+    console.log('📱 Twilio Templates:');
+    console.log(`   Driver Confirmation (QR): ${CONFIG.templateDriverConfirmation}`);
+    console.log(`   Driver Order Accepted: ${CONFIG.templateDriverOrderAccepted}`);
+    console.log(`   Customer Order Confirmed: ${CONFIG.templateCustomerOrderConfirmed}`);
+    console.log(`   Driver Rejected: ${CONFIG.templateDriverRejected}`);
+    console.log(`   No Driver Available: ${CONFIG.templateNoDriverAvailable}`);
     console.log('========================================\n');
 });
