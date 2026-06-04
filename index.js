@@ -222,64 +222,45 @@ async function callJagelApi(url, data = null, method = 'POST') {
 }
 
 // ============================================================
-// FUNGSI ADD BALANCE (TAMBAH SALDO KE MUDICO)
+// FUNGSI ADD BALANCE - SIMPLE VERSION (HARDCODE "amir")
 // ============================================================
 async function addBalance(amount, customer_name, methodCode, serialnumber) {
     const originalAmount = parseInt(amount);
-    let admin;
 
-    console.log(`💰 [ADD-BALANCE] Processing: methodCode=${methodCode}, amount=${originalAmount}`);
-
+    // Hitung admin (4.000 untuk VA, 0.8% untuk QRIS)
+    let admin = 4000;
     if (methodCode === 'QRIS') {
         admin = Math.round(originalAmount * 0.008);
-    } else {
-        admin = 4000;
     }
 
-    const negativeAmount = originalAmount - admin;
-    const username = customer_name.trim();
-    const formattedAmount = negativeAmount.toLocaleString('id-ID');
-    const formattedAdmin = admin.toLocaleString('id-ID');
-    const methodDisplayName = methodCode === 'QRIS' ? 'QRIS' : 'Virtual Account';
+    const netAmount = originalAmount - admin;
+    const username = 'amir'; // ← HARDCODE
 
-    const catatan = `Topup Berhasil || nominal Rp. ${formattedAmount} || biaya admin Rp. ${formattedAdmin} || metode ${methodDisplayName} || Biller Reff ${serialnumber}`;
+    const note = `Pesanan dari ${customer_name} || Rp ${netAmount.toLocaleString('id-ID')} (admin ${admin.toLocaleString('id-ID')}) || ${methodCode === 'QRIS' ? 'QRIS' : 'VA'} || Reff: ${serialnumber}`;
 
-    console.log(`💰 [ADD-BALANCE] username: "${username}"`);
-    console.log(`   Bersih: ${negativeAmount} | Admin: ${admin} | Method: ${methodDisplayName}`);
+    console.log(`💰 [ADD-BALANCE] ${customer_name} -> ${username} | Amount: ${netAmount} | Admin: ${admin}`);
 
-    const mudicoPayload = {
-        action: 'adjust_balance',
-        type: 'username',
-        value: username,
-        amount: negativeAmount,
-        note: catatan,
-    };
-
-    console.log(`📤 [ADD-BALANCE] MUDICO Payload:`, JSON.stringify(mudicoPayload));
-
-    const response = await axios.post(CONFIG.MUDICOUrl, mudicoPayload, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000,
-    });
-
-    console.log('✅ MUDICO Response:', response.data);
-
-    if (response.data?.success === false || response.data?.error) {
-        throw new Error('MUDICO API gagal: ' + JSON.stringify(response.data));
-    }
-
-    setTimeout(() => {
-        axios.post(`${CONFIG.jagelBaseUrl}/message/send`, {
+    try {
+        const response = await axios.post(`${CONFIG.jagelBaseUrl}/balance/adjust`, {
+            action: 'adjust_balance',
             type: 'username',
             value: username,
-            apikey: CONFIG.jagelApiKey,
-            content: catatan,
-        }).catch(err => console.error('⚠️ Jagel Notif Error (Ignored):', err.message));
-    }, 1000);
+            amount: netAmount,
+            note: note,
+            apikey: CONFIG.jagelApiKey
+        }, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000
+        });
 
-    return { success: true, username, negativeAmount, catatan };
+        console.log('✅ Balance added:', response.data);
+        return { success: true, data: response.data };
+
+    } catch (error) {
+        console.error('❌ Add balance failed:', error.message);
+        throw error;
+    }
 }
-
 // ============================================================
 // TWILIO HELPER FUNCTIONS WITH CONTENT TEMPLATE
 // ============================================================
