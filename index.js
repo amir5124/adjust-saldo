@@ -1578,19 +1578,35 @@ app.get('/driver/reject/:orderId', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
 // ============================================================
-app.post('/webhook/whatsapp', async (req, res) => {
-    console.log('\n📨 [WEBHOOK] Received:', JSON.stringify(req.body, null, 2));
+// Perbaiki endpoint webhook untuk menerima kedua format
+app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
+    console.log('\n📨 [WEBHOOK] ============================================');
+    console.log('📨 [WEBHOOK] Content-Type:', req.headers['content-type']);
+    console.log('📨 [WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
 
-    const { Body, From, MessageSid, ProfileName } = req.body;
-    const driverPhone = From ? From.replace('whatsapp:', '') : '';
-    const message = Body ? Body.trim().toUpperCase() : '';
+    // Support both JSON and urlencoded
+    let body = req.body;
+    let rawBody = req.body;
+
+    // Twilio biasanya mengirim sebagai urlencoded
+    const messageBody = rawBody.Body || rawBody.body;
+    const fromNumber = rawBody.From || rawBody.from;
+    const messageSid = rawBody.MessageSid || rawBody.messageSid;
+
+    if (!messageBody || !fromNumber) {
+        console.error('❌ Missing required fields');
+        return res.sendStatus(400);
+    }
+
+    const driverPhone = fromNumber.replace('whatsapp:', '');
+    const message = messageBody.trim().toUpperCase();
 
     console.log(`📱 From: ${driverPhone}, Message: ${message}`);
 
+    // Cari order pending
     let foundOrderId = null;
     let foundConfirmation = null;
 
-    // Cari order pending untuk driver ini
     for (const [orderId, confirmation] of driverConfirmations) {
         if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
             foundOrderId = orderId;
@@ -1600,49 +1616,38 @@ app.post('/webhook/whatsapp', async (req, res) => {
     }
 
     if (foundOrderId && foundConfirmation) {
-        console.log(`🔍 Found pending order ${foundOrderId} for driver ${driverPhone}`);
+        console.log(`🔍 Found pending order ${foundOrderId}`);
 
-        // Handle ACCEPT (TERIMA)
         if (message === 'ACCEPT' || message === 'TERIMA' || message === 'SETUJU' || message === 'YES' || message === 'YA') {
             foundConfirmation.status = 'accepted';
             foundConfirmation.acceptedAt = Date.now();
             driverConfirmations.set(foundOrderId, foundConfirmation);
-
             console.log(`✅ Driver ACCEPTED order ${foundOrderId}`);
 
-            // Send free-form reply to driver (within 24h window)
+            // Kirim respon ke driver
             await sendWhatsAppFreeForm(driverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
 
-            // Trigger order details to be sent
-            res.json({ action: 'accepted', order_id: foundOrderId, confirmation: foundConfirmation });
+            // Kirim detail order (panggil fungsi yang sudah ada)
+            await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
+            await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
 
-            // Handle REJECT (TOLAK)
         } else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
             foundConfirmation.status = 'rejected';
             foundConfirmation.rejectedAt = Date.now();
             driverConfirmations.set(foundOrderId, foundConfirmation);
-
             console.log(`❌ Driver REJECTED order ${foundOrderId}`);
 
-            // Send free-form reply to driver
-            await sendWhatsAppFreeForm(driverPhone, '❌ Pesanan ditolak. Terima kasih sudah memberitahu.');
+            await sendWhatsAppFreeForm(driverPhone, '❌ Pesanan ditolak. Terima kasih.');
 
-            // Send notification to customer using template
+            // Notifikasi customer
             await sendWhatsAppTemplate(
                 foundConfirmation.customer_phone,
                 CONFIG.templateDriverRejected,
                 { "1": foundConfirmation.customer_name }
             );
-
-            res.json({ action: 'rejected', order_id: foundOrderId });
-
-        } else {
-            console.log(`⚠️ Unknown response: ${message}`);
-            res.json({ action: 'unknown', message });
         }
     } else {
         console.log(`⚠️ No pending order found for driver ${driverPhone}`);
-        res.json({ action: 'not_found' });
     }
 
     res.sendStatus(200);
