@@ -988,109 +988,92 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 // ============================================================
 // FUNGSI KIRIM DETAIL ORDER KE DRIVER (FIXED - DENGAN DATA LENGKAP)
 // ============================================================
+// ============================================================
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER (FINAL - TIDAK PERNAH MEMBUAT ORDER BARU)
+// ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
 
     try {
-        // Cari order di database
+        // ✅ CEK APAKAH ORDER ADA DI DATABASE
         let [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [orderId]);
 
-        // ✅ Jika order belum ada, BUAT dari data confirmation dan data dari currentOrderData
+        // ✅ JIKA ORDER TIDAK DITEMUKAN - JANGAN BUAT BARU!
         if (orders.length === 0) {
-            console.log(`⚠️ Order ${orderId} not found, CREATING from confirmation data...`);
-            const now = mysqlNow();
+            console.error(`❌ CRITICAL ERROR: Order ${orderId} not found in database!`);
+            console.error(`   Driver: ${confirmation.driver_name}`);
+            console.error(`   Customer: ${confirmation.customer_name}`);
+            console.error(`   Ini berarti frontend mengirim order_id yang salah ke driver-confirmation`);
 
-            // Parse total amount dari string "Rp 21.000" ke angka 21000
-            let parsedTotal = 21000;
-            if (confirmation.total_amount) {
-                parsedTotal = parseInt(confirmation.total_amount.replace(/\D/g, '')) || 21000;
-            }
+            // Kirim notifikasi ke admin via WhatsApp
+            const adminMessage = `🚨 *ERROR: Order Not Found!*
+━━━━━━━━━━━━━━━━━━━━━
+Order ID: ${orderId}
+Driver: ${confirmation.driver_name}
+Customer: ${confirmation.customer_name}
+Phone: ${confirmation.customer_phone}
 
-            // ✅ AMBIL data lengkap dari currentOrderData (harus dikirim dari frontend)
-            // Data ini seharusnya sudah disimpan di confirmation object oleh frontend
-            const orderData = confirmation.order_data || {};
+⚠️ Frontend mengirim order_id yang salah!
+Order tidak dapat di-assign ke driver.
 
-            await pool.execute(`
-                INSERT INTO orders (
-                    order_id, order_status, order_date, order_note,
-                    service_type, service_name, service_description,
-                    origin_address, origin_lat, origin_lng,
-                    destination_address, destination_lat, destination_lng,
-                    distance_km, estimated_duration_min,
-                    base_price, service_fee, discount, total_price,
-                    payment_method, payment_status, partner_reff,
-                    customer_name, customer_phone,
-                    driver_id, driver_name, driver_phone,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [
-                orderId,
-                'CONFIRMED',
-                now,
-                confirmation.order_note || orderData.order_note || 'Order from driver confirmation',
-                orderData.service_type || null,
-                orderData.service_name || null,
-                orderData.service_description || null,
-                orderData.origin_address || null,
-                orderData.origin_lat || null,
-                orderData.origin_lng || null,
-                orderData.destination_address || null,
-                orderData.destination_lat || null,
-                orderData.destination_lng || null,
-                orderData.distance_km || null,
-                orderData.estimated_duration_min || null,
-                orderData.base_price || 0,
-                orderData.service_fee || 0,
-                orderData.discount || 0,
-                parsedTotal,
-                orderData.payment_method || null,
-                'PAID',
-                orderData.partner_reff || null,
-                confirmation.customer_name,
-                confirmation.customer_phone || orderData.customer_phone || '082323907426',
-                confirmation.driver_id,
-                confirmation.driver_name,
-                confirmation.driver_phone,
-                now,
-                now
-            ]);
+SOLUSI: Pastikan frontend menggunakan order_id yang SAMA
+dengan yang dikirim ke POST /orders`;
 
-            console.log(`✅ Order ${orderId} CREATED with complete data`);
-            [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [orderId]);
-        }
-
-        if (orders.length === 0) {
-            console.error(`❌ Failed to create or find order ${orderId}`);
-            return;
+            await sendWhatsAppFreeForm(CONFIG.adminWaNumber.replace('whatsapp:', ''), adminMessage);
+            return;  // ← STOP! JANGAN BUAT ORDER BARU!
         }
 
         const order = orders[0];
 
-        // Update driver jika belum ada
-        if (!order.driver_id || order.order_status !== 'CONFIRMED') {
-            await pool.execute(`
-                UPDATE orders SET 
-                    driver_id = ?, driver_name = ?, driver_phone = ?,
-                    order_status = 'CONFIRMED', updated_at = ?
-                WHERE order_id = ?
-            `, [confirmation.driver_id, confirmation.driver_name, confirmation.driver_phone, mysqlNow(), orderId]);
-            console.log(`✅ Driver assigned, status: CONFIRMED`);
+        // ✅ CEK APAKAH DRIVER SUDAH TERASSIGN (HINDARI DUPLIKAT)
+        if (order.driver_id) {
+            console.log(`ℹ️ Order ${orderId} already has driver: ${order.driver_name}`);
+            return;
         }
 
-        // Kirim template ke driver
+        // ✅ UPDATE ORDER YANG SUDAH ADA (BUKAN MEMBUAT BARU)
+        const [updateResult] = await pool.execute(`
+            UPDATE orders SET 
+                driver_id = ?,
+                driver_name = ?,
+                driver_phone = ?,
+                order_status = 'CONFIRMED',
+                updated_at = ?
+            WHERE order_id = ? AND driver_id IS NULL
+        `, [
+            confirmation.driver_id,
+            confirmation.driver_name,
+            confirmation.driver_phone,
+            mysqlNow(),
+            orderId
+        ]);
+
+        if (updateResult.affectedRows === 0) {
+            console.log(`⚠️ Order ${orderId} already has a driver, no update needed`);
+            return;
+        }
+
+        console.log(`✅ Driver ${confirmation.driver_name} assigned to order ${orderId}`);
+        console.log(`   Order status updated to CONFIRMED`);
+
+        // ✅ KIRIM NOTIFIKASI KE DRIVER (TEMPLATE)
         const driverVariables = {
             "1": confirmation.driver_name,
             "2": order.customer_name,
             "3": order.customer_phone,
             "4": orderId,
-            "5": "Detail pesanan: " + (order.order_note || '-'),
+            "5": order.order_note || "Pesanan antar makanan",
             "6": formatRupiah(order.total_price)
         };
 
-        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, driverVariables);
-        console.log(`✅ Order details sent to driver`);
+        await sendWhatsAppTemplate(
+            confirmation.driver_phone,
+            CONFIG.templateDriverOrderAccepted,
+            driverVariables
+        );
+        console.log(`✅ Order details sent to driver ${confirmation.driver_name}`);
 
-        // Notifikasi ke customer
+        // ✅ KIRIM NOTIFIKASI KE CUSTOMER
         const customerMessage = `🚗 *DRIVER TELAH DITUGASKAN!*
 ━━━━━━━━━━━━━━━━━━━━━
 Halo *${order.customer_name}*,
@@ -1106,10 +1089,18 @@ ${order.destination_address ? `📍 Tujuan: ${order.destination_address.substrin
 Driver akan segera menghubungi Anda. 🙏`;
 
         await sendWhatsAppFreeForm(order.customer_phone, customerMessage);
-        console.log(`✅ Customer notification sent`);
+        console.log(`✅ Customer notification sent to ${order.customer_phone}`);
 
     } catch (error) {
         console.error(`❌ Error in sendOrderDetailsToDriver:`, error.message);
+        console.error(`   Order ID: ${orderId}`);
+        console.error(`   Driver: ${confirmation.driver_name}`);
+
+        // Kirim notifikasi error ke admin
+        const errorMessage = `❌ *Error in sendOrderDetailsToDriver*
+Order: ${orderId}
+Error: ${error.message}`;
+        await sendWhatsAppFreeForm(CONFIG.adminWaNumber.replace('whatsapp:', ''), errorMessage);
     }
 }
 // ============================================================
@@ -1136,12 +1127,7 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
     }
 }
 
-// ============================================================
-// ENDPOINT: GET /drivers (SSE) - TIDAK BERUBAH
-// ============================================================
-// ============================================================
-// ENDPOINT: GET /drivers (SSE for drivers) - FULL WORKING CODE
-// ============================================================
+
 app.get('/drivers', async (req, res) => {
     const HARDCODED_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjEzODE1NmI0Y2U1NGQxYmY2ZWRkNjllYmU5NjYxYzI3MmIxMjY4NDY5NDUzZjdhMjBjOWM0MWQ1ODNmODAzZjQwOGQ4MzdiN2Y2OGVjYTIzIn0.eyJhdWQiOiIxIiwianRpIjoiMTM4MTU2YjRjZTU0ZDFiZjZlZGQ2OWViZTk2NjFjMjcyYjEyNjg0Njk0NTNmN2EyMGM5YzQxZDU4M2Y4MDNmNDA4ZDgzN2I3ZjY4ZWNhMjMiLCJpYXQiOjE3ODA0OTE1NDEsIm5iZiI6MTc4MDQ5MTU0MSwiZXhwIjoxODEyMDI3NTQxLCJzdWIiOiIyOTcxODQ0Iiwic2NvcGVzIjpbXX0.V3nZisKH-lmfEmf0iqyRmadupFf8nVL5VbpxyBZ_Y7baoA2Q5yoposdHjmokbZqLEZ-a9dL0S2nINPNE9zxdjfU7tmY1Awz24Ii7mOkaQL8dz2680SY5S2raqiWiLn7vYNinTKiA2juWvKMFVvFkfH1PnKQQ_L7nGBW3ReQ0kQg4AbqAj5z1XcfDtuZ9NPLB0QupNsdIkSBz-bliNR3aX9YjL9pzv6aszKSzRYQZni2FT0URQKvPk9B0MXTpFDzKqjURlvkFrN-jpoiV6LSzBlIBuyR5rTf3seU9vPgGDLkDLX9sm7QO8vK7TKBl40TQjbmHT9KE7pQAM-JsPw5QyeJkSpXXNcRnpm1i0Pq8lrJUeAHlyE6j2iIsLoZKtUrQAI2rAdYUjwGFoo6N26c9rbZIEeibNUdSPco68oYY_BqKYoK4kGmzGCkUV1HrZopDhcrNfhDYZEiZtNgkNAiKRpjPXblMIeN7tGjORn29DXqxspGio2DhhNIEex-Ih3a5yaW39EgDVgWS2eDBTV0A6u3ZAJkxPctNkVkxehuxSCYVjnAv6dVjKcypzJQLmMXT77VAQ7hOrrd-_iO5cliCtkyoPjkVDYxEZ9bjAaFwkb7xVKdULFSwAyYzvKYas_-tG3mEvhcUynPRGVcJutfHULGYfYxJWkXdQovk7H-l7uo";
 
