@@ -1373,6 +1373,9 @@ app.get('/drivers', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /driver-confirmation (USING TEMPLATE)
 // ============================================================
+// ============================================================
+// UPDATE ENDPOINT: POST /driver-confirmation
+// ============================================================
 app.post('/driver-confirmation', async (req, res) => {
     const { order_id, driver_id, driver_name, driver_phone, customer_name, total_amount, jumlah_toko } = req.body;
 
@@ -1382,10 +1385,65 @@ app.post('/driver-confirmation', async (req, res) => {
     console.log(`\n📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
     console.log(`   Original phone: ${driver_phone} -> Normalized: ${normalizedDriverPhone}`);
 
+    // ========================================
+    // 🔥 SIMPAN ATAU UPDATE ORDER DI DATABASE
+    // ========================================
+    try {
+        // Cek apakah order sudah ada
+        const [existingOrder] = await pool.execute(
+            'SELECT * FROM orders WHERE order_id = ?',
+            [order_id]
+        );
+
+        if (existingOrder.length === 0) {
+            // Buat order baru dengan data driver
+            const now = mysqlNow();
+            await pool.execute(
+                `INSERT INTO orders (
+                    order_id, order_status, order_date,
+                    driver_id, driver_name, driver_phone,
+                    customer_name, customer_phone,
+                    total_price, payment_status,
+                    created_at, updated_at
+                ) VALUES (?, 'PENDING', NOW(), ?, ?, ?, ?, ?, ?, 'UNPAID', NOW(), NOW())`,
+                [
+                    order_id,
+                    driver_id,
+                    driver_name,
+                    normalizedDriverPhone,
+                    customer_name,
+                    customer_phone,
+                    total_amount || 0
+                ]
+            );
+            console.log(`✅ New order ${order_id} created with driver data`);
+        } else {
+            // Update order yang sudah ada dengan data driver
+            await pool.execute(
+                `UPDATE orders 
+                 SET driver_id = ?,
+                     driver_name = ?,
+                     driver_phone = ?,
+                     updated_at = NOW()
+                 WHERE order_id = ?`,
+                [
+                    driver_id,
+                    driver_name,
+                    normalizedDriverPhone,
+                    order_id
+                ]
+            );
+            console.log(`✅ Order ${order_id} updated with driver data`);
+        }
+    } catch (dbError) {
+        console.error(`❌ Database operation failed:`, dbError.message);
+    }
+
+    // Simpan ke memory cache
     driverConfirmations.set(order_id, {
         driver_id,
         driver_name,
-        driver_phone: normalizedDriverPhone,  // Simpan dalam format normal
+        driver_phone: normalizedDriverPhone,
         customer_name,
         total_amount,
         jumlah_toko,
@@ -1394,7 +1452,7 @@ app.post('/driver-confirmation', async (req, res) => {
         expiresAt: Date.now() + (3 * 60 * 1000)
     });
 
-    // Send using Quick Reply Template
+    // Send WhatsApp template
     const variables = {
         "1": driver_name,
         "2": customer_name,
@@ -1414,9 +1472,67 @@ app.post('/driver-confirmation', async (req, res) => {
         console.error(`❌ Failed to send confirmation to driver ${driver_name}`);
     }
 
-    res.json({ success: result.success, order_id, ...result });
+    res.json({
+        success: result.success,
+        order_id,
+        driver_saved: true,
+        ...result
+    });
 });
 
+// ============================================================
+// ENDPOINT: POST /orders/:order_id/assign-driver
+// ============================================================
+app.post('/orders/:order_id/assign-driver', async (req, res) => {
+    const { order_id } = req.params;
+    const { driver_id, driver_name, driver_phone } = req.body;
+
+    if (!driver_id || !driver_name || !driver_phone) {
+        return res.status(400).json({
+            success: false,
+            message: 'driver_id, driver_name, dan driver_phone wajib diisi'
+        });
+    }
+
+    try {
+        const normalizedPhone = normalizePhoneNumber(driver_phone);
+
+        const [result] = await pool.execute(
+            `UPDATE orders 
+             SET driver_id = ?,
+                 driver_name = ?,
+                 driver_phone = ?,
+                 order_status = 'CONFIRMED',
+                 updated_at = NOW()
+             WHERE order_id = ?`,
+            [driver_id, driver_name, normalizedPhone, order_id]
+        );
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Order tidak ditemukan'
+            });
+        }
+
+        console.log(`✅ Driver ${driver_name} assigned to order ${order_id}`);
+
+        res.json({
+            success: true,
+            message: 'Driver berhasil diassign ke order',
+            order_id,
+            driver: { driver_id, driver_name, driver_phone: normalizedPhone }
+        });
+
+    } catch (err) {
+        console.error('❌ [ASSIGN-DRIVER] Error:', err.message);
+        res.status(500).json({
+            success: false,
+            error: 'Gagal assign driver',
+            detail: err.message
+        });
+    }
+});
 // ============================================================
 // ENDPOINT: POST /send-order-details (USING TEMPLATE)
 // ============================================================
@@ -1685,9 +1801,11 @@ app.get('/driver/reject/:orderId', async (req, res) => {
 
 
 // ============================================================
+// ============================================================
+// UPDATE WEBHOOK HANDLER - Update order dengan data driver
+// ============================================================
 app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
     console.log('\n📨 [WEBHOOK] ============================================');
-    console.log('📨 [WEBHOOK] Content-Type:', req.headers['content-type']);
     console.log('📨 [WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
 
     const messageBody = req.body.Body || req.body.body;
@@ -1720,12 +1838,66 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     if (foundOrderId && foundConfirmation) {
         console.log(`✅ Found pending order ${foundOrderId}`);
 
-        // CEK UNTUK ACCEPT - Masukkan "ACCEPT" karena itu yang dikirim Twilio!
+        // CEK UNTUK ACCEPT
         if (message === 'ACCEPT' || message === 'TERIMA' || message === 'SETUJU' || message === 'YES' || message === 'YA') {
             foundConfirmation.status = 'accepted';
             foundConfirmation.acceptedAt = Date.now();
             driverConfirmations.set(foundOrderId, foundConfirmation);
             console.log(`✅ Driver ACCEPTED order ${foundOrderId}`);
+
+            // ========================================
+            // 🔥 UPDATE DATABASE DENGAN DATA DRIVER
+            // ========================================
+            try {
+                // Cek apakah order sudah ada di database
+                const [existingOrder] = await pool.execute(
+                    'SELECT * FROM orders WHERE order_id = ?',
+                    [foundOrderId]
+                );
+
+                if (existingOrder.length > 0) {
+                    // UPDATE existing order dengan data driver
+                    const [updateResult] = await pool.execute(
+                        `UPDATE orders 
+                         SET order_status = 'CONFIRMED',
+                             driver_id = ?,
+                             driver_name = ?,
+                             driver_phone = ?,
+                             updated_at = NOW()
+                         WHERE order_id = ?`,
+                        [
+                            foundConfirmation.driver_id,
+                            foundConfirmation.driver_name,
+                            foundConfirmation.driver_phone,
+                            foundOrderId
+                        ]
+                    );
+                    console.log(`✅ Order ${foundOrderId} updated with driver data`);
+                } else {
+                    // INSERT new order jika belum ada (fallback)
+                    const now = mysqlNow();
+                    const [insertResult] = await pool.execute(
+                        `INSERT INTO orders (
+                            order_id, order_status, order_date, 
+                            driver_id, driver_name, driver_phone,
+                            customer_name, customer_phone, 
+                            total_price, payment_status, created_at, updated_at
+                        ) VALUES (?, 'CONFIRMED', NOW(), ?, ?, ?, ?, ?, ?, 'PAID', NOW(), NOW())`,
+                        [
+                            foundOrderId,
+                            foundConfirmation.driver_id,
+                            foundConfirmation.driver_name,
+                            foundConfirmation.driver_phone,
+                            foundConfirmation.customer_name,
+                            foundConfirmation.customer_phone,
+                            foundConfirmation.total_amount || 0
+                        ]
+                    );
+                    console.log(`✅ New order ${foundOrderId} created with driver data`);
+                }
+            } catch (dbError) {
+                console.error(`❌ Database update failed:`, dbError.message);
+            }
 
             // Kirim respon ke driver
             await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
@@ -1734,32 +1906,28 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
             await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
             await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
 
-        }
-        // CEK UNTUK REJECT - Masukkan "REJECT" karena itu yang dikirim Twilio!
-        else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
+        } else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
+            // Similar update for reject...
             foundConfirmation.status = 'rejected';
-            foundConfirmation.rejectedAt = Date.now();
             driverConfirmations.set(foundOrderId, foundConfirmation);
-            console.log(`❌ Driver REJECTED order ${foundOrderId}`);
+
+            // Update database untuk reject
+            try {
+                await pool.execute(
+                    `UPDATE orders 
+                     SET order_status = 'SEARCHING', 
+                         updated_at = NOW()
+                     WHERE order_id = ?`,
+                    [foundOrderId]
+                );
+            } catch (dbError) {
+                console.error(`❌ Database update failed:`, dbError.message);
+            }
 
             await sendWhatsAppFreeForm(rawDriverPhone, '❌ Pesanan ditolak. Terima kasih.');
-
-            await sendWhatsAppTemplate(
-                foundConfirmation.customer_phone,
-                CONFIG.templateDriverRejected,
-                { "1": foundConfirmation.customer_name }
-            );
-        } else {
-            console.log(`⚠️ Unknown message: ${message}`);
         }
     } else {
         console.log(`⚠️ No pending order found for driver ${driverPhone}`);
-        // Debug: tampilkan semua pending order
-        for (const [orderId, confirmation] of driverConfirmations) {
-            if (confirmation.status === 'pending') {
-                console.log(`   Pending: ${orderId} -> driver: ${confirmation.driver_phone}`);
-            }
-        }
     }
 
     res.sendStatus(200);
