@@ -2045,7 +2045,7 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 // FUNGSI KIRIM DETAIL ORDER KE DRIVER
 // ============================================================
 // ============================================================
-// FUNGSI KIRIM DETAIL ORDER KE DRIVER
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER (UPDATED)
 // ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
@@ -2059,12 +2059,31 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 
         if (orders.length === 0) {
             console.log(`⚠️ Order ${orderId} not found in database yet, skipping detail send`);
-            console.log(`   Driver will receive details later when order is saved`);
             return;
         }
 
         const order = orders[0];
 
+        // ✅ UPDATE: Assign driver ke order dan ubah status ke CONFIRMED
+        await pool.execute(`
+            UPDATE orders SET 
+                driver_id = ?,
+                driver_name = ?,
+                driver_phone = ?,
+                order_status = 'CONFIRMED',
+                updated_at = ?
+            WHERE order_id = ?
+        `, [
+            confirmation.driver_id,
+            confirmation.driver_name,
+            confirmation.driver_phone,
+            mysqlNow(),
+            orderId
+        ]);
+
+        console.log(`✅ Driver ${confirmation.driver_name} assigned to order ${orderId}, status: CONFIRMED`);
+
+        // Kirim template WhatsApp ke driver
         const variables = {
             "1": confirmation.driver_name,
             "2": order.customer_name,
@@ -2082,13 +2101,45 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 
         console.log(`✅ Order details sent to driver`);
 
+        // Kirim notifikasi ke customer bahwa driver sudah ditugaskan
+        await sendDriverAssignedNotification(order, confirmation);
+
     } catch (error) {
         console.error(`❌ Error sending order details:`, error.message);
     }
 }
 
 // ============================================================
-// FUNGSI NOTIFIKASI KE CUSTOMER
+// FUNGSI NOTIFIKASI DRIVER ASSIGNED KE CUSTOMER
+// ============================================================
+async function sendDriverAssignedNotification(order, confirmation) {
+    console.log(`📧 [DRIVER-ASSIGNED] Notifying customer for order ${order.order_id}`);
+
+    const message = `🚗 *DRIVER TELAH DITUGASKAN!*
+━━━━━━━━━━━━━━━━━━━━━
+Halo *${order.customer_name}*,
+
+Pesanan Anda telah dikonfirmasi oleh driver!
+
+📋 *Detail Pesanan:*
+Order ID: ${order.order_id}
+Driver: ${confirmation.driver_name}
+Total: ${formatRupiah(order.total_price)}
+
+Driver akan segera menghubungi Anda via WhatsApp.
+
+Terima kasih telah menggunakan layanan kami! 🙏`;
+
+    try {
+        await sendWhatsAppFreeForm(order.customer_phone, message);
+        console.log(`✅ Customer notification sent to ${order.customer_phone}`);
+    } catch (error) {
+        console.error('Error sending customer notification:', error.message);
+    }
+}
+
+// ============================================================
+// FUNGSI NOTIFIKASI KE CUSTOMER (UPDATED)
 // ============================================================
 async function notifyCustomerOrderAccepted(orderId, confirmation) {
     console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
@@ -2106,12 +2157,32 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
 
         const order = orders[0];
 
+        // Pastikan status sudah CONFIRMED
+        if (order.order_status !== 'CONFIRMED') {
+            await pool.execute(`
+                UPDATE orders SET 
+                    order_status = 'CONFIRMED',
+                    driver_id = ?,
+                    driver_name = ?,
+                    driver_phone = ?,
+                    updated_at = ?
+                WHERE order_id = ?
+            `, [
+                confirmation.driver_id,
+                confirmation.driver_name,
+                confirmation.driver_phone,
+                mysqlNow(),
+                orderId
+            ]);
+            console.log(`✅ Order ${orderId} status updated to CONFIRMED`);
+        }
+
         const variables = {
             "1": order.customer_name,
             "2": confirmation.driver_name,
             "3": confirmation.driver_phone,
             "4": orderId,
-            "5": "Pesanan Anda sedang diproses oleh driver",
+            "5": "Pesanan Anda telah dikonfirmasi oleh driver dan sedang diproses",
             "6": formatRupiah(order.total_price)
         };
 
@@ -2127,6 +2198,51 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
         console.error(`❌ Error sending customer notification:`, error.message);
     }
 }
+
+// Endpoint untuk fix order yang sudah diaccept
+app.post('/fix-accepted-orders', async (req, res) => {
+    console.log('🔧 Fixing accepted orders...');
+
+    try {
+        // Cari semua order yang memiliki driver confirmation di memory
+        const fixedOrders = [];
+
+        for (const [orderId, confirmation] of driverConfirmations) {
+            if (confirmation.status === 'accepted') {
+                // Update database
+                const [result] = await pool.execute(`
+                    UPDATE orders SET 
+                        driver_id = ?,
+                        driver_name = ?,
+                        driver_phone = ?,
+                        order_status = 'CONFIRMED',
+                        updated_at = ?
+                    WHERE order_id = ? AND order_status != 'CONFIRMED'
+                `, [
+                    confirmation.driver_id,
+                    confirmation.driver_name,
+                    confirmation.driver_phone,
+                    mysqlNow(),
+                    orderId
+                ]);
+
+                if (result.affectedRows > 0) {
+                    fixedOrders.push(orderId);
+                    console.log(`✅ Fixed order ${orderId}`);
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `Fixed ${fixedOrders.length} orders`,
+            fixed_orders: fixedOrders
+        });
+    } catch (error) {
+        console.error('Error fixing orders:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 // ============================================================
 // ENDPOINT: GET /check-confirmation/:orderId
 // ============================================================
