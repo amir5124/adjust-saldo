@@ -1069,22 +1069,49 @@ app.get('/orders', async (req, res) => {
         const where = [];
         const params = [];
 
-        if (driver_id) { where.push('driver_id = ?'); params.push(driver_id); }
-        if (mitra_id) { where.push('mitra_id = ?'); params.push(mitra_id); }
-        if (status) { where.push('order_status = ?'); params.push(status.toUpperCase()); }
+        if (driver_id) {
+            where.push('driver_id = ?');
+            params.push(driver_id);
+        }
+        if (mitra_id) {
+            where.push('mitra_id = ?');
+            params.push(mitra_id);
+        }
+        if (status) {
+            where.push('order_status = ?');
+            params.push(status.toUpperCase());
+        }
 
         const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-        params.push(parseInt(limit), parseInt(offset));
+
+        // ✅ PERBAIKAN: Parse limit dan offset ke integer dengan default value
+        const parsedLimit = parseInt(limit) || 50;
+        const parsedOffset = parseInt(offset) || 0;
+
+        // ✅ PERBAIKAN: Tambahkan validasi angka positif
+        const finalLimit = Math.max(1, Math.min(parsedLimit, 1000)); // Max 1000 records
+        const finalOffset = Math.max(0, parsedOffset);
+
+        params.push(finalLimit, finalOffset);
 
         const [results] = await pool.execute(
             `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
             params
         );
+
         res.json({ success: true, count: results.length, data: results });
 
     } catch (err) {
         console.error('❌ [ORDERS-LIST] Error:', err.message);
-        res.status(500).json({ error: 'Gagal mengambil data orders', detail: err.message });
+        console.error('📝 [ORDERS-LIST] Query params:', req.query);
+        console.error('📝 [ORDERS-LIST] Where clause:', whereClause);
+        console.error('📝 [ORDERS-LIST] Params:', params);
+
+        res.status(500).json({
+            error: 'Gagal mengambil data orders',
+            detail: err.message,
+            hint: 'Pastikan limit dan offset adalah angka yang valid'
+        });
     }
 });
 
@@ -1601,12 +1628,7 @@ app.get('/driver/reject/:orderId', async (req, res) => {
     }
 });
 
-// ============================================================
-// ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
-// ============================================================
-// Perbaiki endpoint webhook untuk menerima kedua format
-// ============================================================
-// ENDPOINT: POST /webhook/whatsapp (Twilio Webhook for Quick Reply)
+
 // ============================================================
 app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
     console.log('\n📨 [WEBHOOK] ============================================');
