@@ -762,13 +762,85 @@ app.post('/create-qris', async (req, res) => {
 });
 
 // ============================================================
+// FUNGSI UPDATE ORDER STATUS DARI CALLBACK
+// ============================================================
+async function updateOrderStatusFromCallback(partner_reff, paymentStatus) {
+    try {
+        // Update status pembayaran di tabel orders
+        const [result] = await pool.execute(
+            `UPDATE orders 
+             SET payment_status = ?, 
+                 order_status = CASE 
+                     WHEN order_status = 'PENDING' AND ? = 'PAID' THEN 'SEARCHING'
+                     ELSE order_status 
+                 END,
+                 updated_at = ?
+             WHERE partner_reff = ?`,
+            [paymentStatus, paymentStatus, mysqlNow(), partner_reff]
+        );
+
+        if (result.affectedRows > 0) {
+            console.log(`✅ Order status updated for partner_reff: ${partner_reff} to ${paymentStatus}`);
+
+            // Ambil detail order untuk notifikasi
+            const [orders] = await pool.execute(
+                'SELECT * FROM orders WHERE partner_reff = ?',
+                [partner_reff]
+            );
+
+            if (orders.length > 0) {
+                const order = orders[0];
+
+                // Kirim notifikasi ke customer bahwa pembayaran berhasil
+                await sendPaymentSuccessNotification(order);
+            }
+
+            return true;
+        } else {
+            console.log(`⚠️ No order found with partner_reff: ${partner_reff}`);
+            return false;
+        }
+    } catch (error) {
+        console.error('❌ Error updating order status:', error.message);
+        return false;
+    }
+}
+
+// ============================================================
+// FUNGSI KIRIM NOTIFIKASI PEMBAYARAN SUKSES
+// ============================================================
+async function sendPaymentSuccessNotification(order) {
+    console.log(`📧 [PAYMENT-NOTIFICATION] Order: ${order.order_id}`);
+
+    try {
+        const message = `✅ *PEMBAYARAN BERHASIL!*
+━━━━━━━━━━━━━━━━━━━━━
+Halo *${order.customer_name}*,
+
+Pembayaran Anda sebesar *${formatRupiah(order.total_price)}* telah berhasil.
+
+Status pesanan: *${order.order_status}*
+Order ID: ${order.order_id}
+
+Kami akan segera mencari driver terdekat untuk pesanan Anda.
+
+Terima kasih! 🙏`;
+
+        await sendWhatsAppFreeForm(order.customer_phone, message);
+        console.log(`✅ Payment notification sent to customer`);
+    } catch (error) {
+        console.error('❌ Error sending payment notification:', error.message);
+    }
+}
+
+// ============================================================
 // ENDPOINT: POST /callback
 // ============================================================
 app.post('/callback', async (req, res) => {
     console.log('\n📞 [CALLBACK] ============================================');
     console.log('📞 [CALLBACK] Payload:', JSON.stringify(req.body, null, 2));
 
-    const { partner_reff, serialnumber } = req.body;
+    const { partner_reff, serialnumber, status, transaction_status } = req.body;
 
     if (!partner_reff) {
         logToFile('Missing partner_reff', 'ERROR');
@@ -833,6 +905,9 @@ app.post('/callback', async (req, res) => {
 
         await addBalance(dbData.amount, dbData.customer_name, methodCode, serialnumber || partner_reff);
 
+        // ✅ TAMBAHKAN: Update status order di tabel orders
+        await updateOrderStatusFromCallback(partner_reff, 'PAID');
+
         console.log(`🎉 [CALLBACK] SUCCESS: Saldo ditambahkan untuk ${dbData.customer_name} via ${methodCode}`);
         res.json({ message: 'Callback diterima dan saldo ditambahkan' });
 
@@ -867,6 +942,51 @@ app.post('/callback', async (req, res) => {
     } finally {
         connection.release();
         console.log(`🔓 [CALLBACK] Connection released for ${partner_reff}`);
+    }
+});
+
+// ============================================================
+// ENDPOINT: POST /sync-order-status (sinkronisasi manual)
+// ============================================================
+app.post('/sync-order-status', async (req, res) => {
+    const { partner_reff } = req.body;
+
+    if (!partner_reff) {
+        return res.status(400).json({ error: 'partner_reff required' });
+    }
+
+    try {
+        // Cek status dari inquiry_va atau inquiry_qris
+        let [vaRows] = await pool.execute(
+            'SELECT status FROM inquiry_va WHERE partner_reff = ?',
+            [partner_reff]
+        );
+
+        let paymentStatus = null;
+        if (vaRows.length > 0 && vaRows[0].status === 'SUKSES') {
+            paymentStatus = 'PAID';
+        }
+
+        if (!paymentStatus) {
+            let [qrisRows] = await pool.execute(
+                'SELECT status FROM inquiry_qris WHERE partner_reff = ?',
+                [partner_reff]
+            );
+            if (qrisRows.length > 0 && qrisRows[0].status === 'SUKSES') {
+                paymentStatus = 'PAID';
+            }
+        }
+
+        if (paymentStatus) {
+            await updateOrderStatusFromCallback(partner_reff, paymentStatus);
+            res.json({ success: true, message: 'Order status synchronized', status: paymentStatus });
+        } else {
+            res.json({ success: false, message: 'Payment not found or not successful' });
+        }
+
+    } catch (error) {
+        console.error('❌ Sync error:', error);
+        res.status(500).json({ error: error.message });
     }
 });
 
