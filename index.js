@@ -1063,54 +1063,71 @@ app.post('/orders', async (req, res) => {
 // ENDPOINT: GET /orders (list orders dengan filter)
 // ============================================================
 app.get('/orders', async (req, res) => {
-    const { driver_id, mitra_id, status, limit = 50, offset = 0 } = req.query;
-
     try {
-        const where = [];
-        const params = [];
+        const { driver_id, mitra_id, status, limit = 50, offset = 0 } = req.query;
 
-        if (driver_id) {
-            where.push('driver_id = ?');
-            params.push(driver_id);
-        }
-        if (mitra_id) {
-            where.push('mitra_id = ?');
-            params.push(mitra_id);
-        }
-        if (status) {
-            where.push('order_status = ?');
-            params.push(status.toUpperCase());
+        console.log('📝 [ORDERS-LIST] Received query:', { driver_id, mitra_id, status, limit, offset });
+
+        // Build WHERE clause
+        const conditions = [];
+        const values = [];
+
+        if (driver_id && driver_id !== 'undefined' && driver_id !== 'null') {
+            conditions.push('driver_id = ?');
+            values.push(driver_id);
         }
 
-        const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+        if (mitra_id && mitra_id !== 'undefined' && mitra_id !== 'null') {
+            conditions.push('mitra_id = ?');
+            values.push(mitra_id);
+        }
 
-        // ✅ PERBAIKAN: Parse limit dan offset ke integer dengan default value
-        const parsedLimit = parseInt(limit) || 50;
-        const parsedOffset = parseInt(offset) || 0;
+        if (status && status !== 'undefined' && status !== 'null' && status !== 'ALL') {
+            conditions.push('order_status = ?');
+            values.push(status.toUpperCase());
+        }
 
-        // ✅ PERBAIKAN: Tambahkan validasi angka positif
-        const finalLimit = Math.max(1, Math.min(parsedLimit, 1000)); // Max 1000 records
-        const finalOffset = Math.max(0, parsedOffset);
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-        params.push(finalLimit, finalOffset);
+        // Parse pagination dengan aman
+        let parsedLimit = parseInt(limit);
+        let parsedOffset = parseInt(offset);
 
-        const [results] = await pool.execute(
-            `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-            params
-        );
+        if (isNaN(parsedLimit) || parsedLimit < 1) parsedLimit = 50;
+        if (isNaN(parsedOffset) || parsedOffset < 0) parsedOffset = 0;
 
-        res.json({ success: true, count: results.length, data: results });
+        // Batasi maksimal 1000 records
+        parsedLimit = Math.min(parsedLimit, 1000);
+
+        // Build query
+        let query = `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ${parsedLimit} OFFSET ${parsedOffset}`;
+
+        console.log('📝 [ORDERS-LIST] Query:', query);
+        console.log('📝 [ORDERS-LIST] Values:', values);
+
+        // Execute query
+        const [results] = await pool.execute(query, values);
+
+        console.log(`✅ [ORDERS-LIST] Success: ${results.length} orders found`);
+
+        res.json({
+            success: true,
+            count: results.length,
+            data: results,
+            pagination: {
+                limit: parsedLimit,
+                offset: parsedOffset
+            }
+        });
 
     } catch (err) {
         console.error('❌ [ORDERS-LIST] Error:', err.message);
-        console.error('📝 [ORDERS-LIST] Query params:', req.query);
-        console.error('📝 [ORDERS-LIST] Where clause:', whereClause);
-        console.error('📝 [ORDERS-LIST] Params:', params);
+        console.error('❌ [ORDERS-LIST] Stack:', err.stack);
 
         res.status(500).json({
             error: 'Gagal mengambil data orders',
             detail: err.message,
-            hint: 'Pastikan limit dan offset adalah angka yang valid'
+            stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
         });
     }
 });
