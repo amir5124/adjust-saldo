@@ -946,6 +946,47 @@ app.post('/callback', async (req, res) => {
 });
 
 // ============================================================
+// ENDPOINT: POST /sync-all-orders (untuk sync data lama)
+// ============================================================
+app.post('/sync-all-orders', async (req, res) => {
+    console.log('🔄 Syncing all orders...');
+
+    try {
+        // Ambil semua order dengan payment_status = 'PAID' tapi order_status masih 'PENDING'
+        const [orders] = await pool.execute(`
+            SELECT * FROM orders 
+            WHERE payment_status = 'PAID' AND order_status = 'PENDING'
+        `);
+
+        console.log(`Found ${orders.length} orders to sync`);
+
+        let updated = 0;
+        for (const order of orders) {
+            // Update status ke SEARCHING atau CONFIRMED jika sudah ada driver
+            const newStatus = order.driver_id ? 'CONFIRMED' : 'SEARCHING';
+            await pool.execute(`
+                UPDATE orders 
+                SET order_status = ?, updated_at = ?
+                WHERE order_id = ?
+            `, [newStatus, mysqlNow(), order.order_id]);
+            updated++;
+            console.log(`✅ Synced order ${order.order_id} -> ${newStatus}`);
+        }
+
+        res.json({
+            success: true,
+            message: `Synced ${updated} orders`,
+            total_found: orders.length,
+            updated: updated
+        });
+
+    } catch (error) {
+        console.error('Sync error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================================
 // ENDPOINT: POST /sync-order-status (sinkronisasi manual)
 // ============================================================
 app.post('/sync-order-status', async (req, res) => {
@@ -1108,6 +1149,9 @@ app.post('/add-balance', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /orders (buat order baru)
 // ============================================================
+// ============================================================
+// ENDPOINT: POST /orders (buat order baru) - UPDATED
+// ============================================================
 app.post('/orders', async (req, res) => {
     console.log('\n🛒 [ORDERS-CREATE] Request received:', JSON.stringify(req.body, null, 2));
 
@@ -1115,8 +1159,15 @@ app.post('/orders', async (req, res) => {
 
     try {
         const body = req.body;
-        const order_id = `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        const order_id = body.order_id || `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const now = mysqlNow();
+
+        // ✅ Jika payment sudah PAID, set order_status ke SEARCHING
+        let orderStatus = body.order_status || 'PENDING';
+        if (body.payment_status === 'PAID' && orderStatus === 'PENDING') {
+            orderStatus = 'SEARCHING';
+            console.log(`✅ Payment already PAID, setting order_status to SEARCHING`);
+        }
 
         const [dbResult] = await pool.execute(`
             INSERT INTO orders (
@@ -1134,7 +1185,7 @@ app.post('/orders', async (req, res) => {
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `, [
             order_id,
-            body.order_status || 'PENDING',
+            orderStatus,
             body.order_date || now,
             body.order_note || null,
             body.service_type || null,
@@ -1171,7 +1222,20 @@ app.post('/orders', async (req, res) => {
             now,
         ]);
 
-        res.status(201).json({ success: true, message: 'Order berhasil dibuat', order_id, insert_id: dbResult.insertId });
+        // ✅ Jika payment PAID, trigger pencarian driver
+        if (body.payment_status === 'PAID') {
+            console.log(`🎯 [ORDERS-CREATE] Payment PAID, triggering driver search for ${order_id}`);
+            // Trigger driver search (bisa panggil endpoint atau emit event)
+            triggerDriverSearch(order_id, body);
+        }
+
+        res.status(201).json({
+            success: true,
+            message: 'Order berhasil dibuat',
+            order_id,
+            order_status: orderStatus,
+            insert_id: dbResult.insertId
+        });
 
     } catch (err) {
         console.error('❌ [ORDERS-CREATE] Error:', err.message);
@@ -1179,6 +1243,32 @@ app.post('/orders', async (req, res) => {
     }
 });
 
+// ============================================================
+// FUNGSI TRIGGER PENCARIAN DRIVER
+// ============================================================
+async function triggerDriverSearch(order_id, orderData) {
+    console.log(`🔍 [DRIVER-SEARCH] Starting search for order: ${order_id}`);
+
+    // Disini Anda bisa implementasi logika pencarian driver
+    // Misalnya: kirim notifikasi ke semua driver aktif
+    // Atau panggil endpoint /driver-confirmation
+
+    // Contoh: Kirim notifikasi ke admin/driver terdekat
+    try {
+        const adminMessage = `🔍 *PENCARIAN DRIVER*
+━━━━━━━━━━━━━━━━━━━━━
+Order ID: ${order_id}
+Customer: ${orderData.customer_name}
+Total: ${formatRupiah(orderData.total_price)}
+Jarak: ${orderData.distance_km} km
+
+Sedang mencari driver terdekat...`;
+
+        await sendWhatsAppFreeForm(CONFIG.adminWaNumber.replace('whatsapp:', ''), adminMessage);
+    } catch (error) {
+        console.error('Error triggering driver search:', error);
+    }
+}
 // ============================================================
 // ENDPOINT: GET /orders (list orders dengan filter)
 // ============================================================
@@ -1276,6 +1366,9 @@ app.get('/orders/:order_id', async (req, res) => {
 // ============================================================
 // ENDPOINT: PUT /orders/:order_id (update order)
 // ============================================================
+// ============================================================
+// ENDPOINT: PUT /orders/:order_id (update order) - UPDATED
+// ============================================================
 app.put('/orders/:order_id', async (req, res) => {
     const { order_id } = req.params;
     const body = req.body;
@@ -1319,6 +1412,21 @@ app.put('/orders/:order_id', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
         }
 
+        // ✅ Jika driver di-assign, update status order ke CONFIRMED
+        if (body.driver_id && body.driver_name) {
+            await pool.execute(
+                `UPDATE orders SET order_status = 'CONFIRMED', updated_at = ? WHERE order_id = ?`,
+                [mysqlNow(), order_id]
+            );
+            console.log(`✅ Driver ${body.driver_name} assigned to order ${order_id}, status updated to CONFIRMED`);
+
+            // Kirim notifikasi ke customer
+            const [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [order_id]);
+            if (orders.length > 0) {
+                await sendDriverAssignedNotification(orders[0]);
+            }
+        }
+
         res.json({ success: true, message: 'Order berhasil diupdate', order_id });
 
     } catch (err) {
@@ -1327,6 +1435,92 @@ app.put('/orders/:order_id', async (req, res) => {
     }
 });
 
+// ============================================================
+// FUNGSI NOTIFIKASI DRIVER ASSIGNED
+// ============================================================
+async function sendDriverAssignedNotification(order) {
+    console.log(`📧 [DRIVER-ASSIGNED] Sending notification for order ${order.order_id}`);
+
+    const message = `🚗 *DRIVER TELAH DITUGASKAN!*
+━━━━━━━━━━━━━━━━━━━━━
+Halo *${order.customer_name}*,
+
+Driver *${order.driver_name}* telah ditugaskan untuk pesanan Anda.
+
+📋 Order ID: ${order.order_id}
+💰 Total: ${formatRupiah(order.total_price)}
+
+Driver akan segera menghubungi Anda.
+
+Terima kasih! 🙏`;
+
+    try {
+        await sendWhatsAppFreeForm(order.customer_phone, message);
+        console.log(`✅ Driver assigned notification sent to ${order.customer_phone}`);
+    } catch (error) {
+        console.error('Error sending notification:', error);
+    }
+}
+
+// ============================================================
+// ENDPOINT: POST /orders/:order_id/assign-driver
+// ============================================================
+app.post('/orders/:order_id/assign-driver', async (req, res) => {
+    const { order_id } = req.params;
+    const { driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng } = req.body;
+
+    if (!driver_id || !driver_name) {
+        return res.status(400).json({ success: false, message: 'driver_id dan driver_name wajib diisi' });
+    }
+
+    try {
+        const [result] = await pool.execute(`
+            UPDATE orders SET 
+                driver_id = ?,
+                driver_name = ?,
+                driver_phone = ?,
+                driver_photo = ?,
+                driver_address = ?,
+                driver_lat = ?,
+                driver_lng = ?,
+                order_status = 'CONFIRMED',
+                updated_at = ?
+            WHERE order_id = ?
+        `, [
+            driver_id,
+            driver_name,
+            driver_phone || null,
+            driver_photo || null,
+            driver_address || null,
+            driver_lat || null,
+            driver_lng || null,
+            mysqlNow(),
+            order_id
+        ]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
+        }
+
+        // Ambil data order yang sudah diupdate
+        const [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [order_id]);
+        const order = orders[0];
+
+        // Kirim notifikasi ke customer
+        await sendDriverAssignedNotification(order);
+
+        res.json({
+            success: true,
+            message: 'Driver berhasil ditugaskan',
+            order_status: 'CONFIRMED',
+            driver: { driver_id, driver_name, driver_phone }
+        });
+
+    } catch (error) {
+        console.error('❌ Error assigning driver:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 // ============================================================
 // ENDPOINT: GET /drivers (SSE for drivers)
 // ============================================================
