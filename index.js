@@ -988,70 +988,107 @@ app.post('/add-balance', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /orders (buat order baru)
 // ============================================================
-app.post('/orders', async (req, res) => {
-    console.log('\n🛒 [ORDERS-CREATE] Request received:', JSON.stringify(req.body, null, 2));
+const VALID_ORDER_STATUSES = [
+    'PENDING', 'SEARCHING', 'CONFIRMED', 'PICKED_UP',
+    'ON_THE_WAY', 'ARRIVED', 'COMPLETED', 'CANCELLED', 'FAILED'
+];
 
-    if (!dbReady) return res.status(503).json({ error: 'Database not ready' });
+const VALID_PAYMENT_STATUSES = ['UNPAID', 'PAID', 'REFUNDED', 'FAILED'];
+
+// ============================================================
+// ENDPOINT: POST /orders (buat order baru)
+// ============================================================
+app.post('/orders', checkDb, async (req, res) => {
+    console.log('\n🛒 [ORDERS-CREATE] Request received:', JSON.stringify(req.body, null, 2));
 
     try {
         const body = req.body;
+
+        // --- Validasi field wajib ---
+        if (!body.customer_name || !body.customer_phone) {
+            return res.status(400).json({
+                success: false,
+                error: 'customer_name dan customer_phone wajib diisi'
+            });
+        }
+
+        // --- Validasi enum order_status ---
+        if (body.order_status && !VALID_ORDER_STATUSES.includes(body.order_status.toUpperCase())) {
+            return res.status(400).json({
+                success: false,
+                error: 'order_status tidak valid',
+                valid: VALID_ORDER_STATUSES
+            });
+        }
+
+        // --- Validasi enum payment_status ---
+        if (body.payment_status && !VALID_PAYMENT_STATUSES.includes(body.payment_status.toUpperCase())) {
+            return res.status(400).json({
+                success: false,
+                error: 'payment_status tidak valid',
+                valid: VALID_PAYMENT_STATUSES
+            });
+        }
+
         const order_id = `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const now = mysqlNow();
 
-        const [dbResult] = await pool.execute(`
-            INSERT INTO orders (
-                order_id, order_status, order_date, order_note,
-                service_type, service_name, service_description,
-                origin_address, origin_lat, origin_lng,
-                destination_address, destination_lat, destination_lng,
-                distance_km, estimated_duration_min,
-                base_price, service_fee, discount, total_price,
-                payment_method, payment_status, partner_reff,
-                mitra_id, mitra_name, mitra_phone,
-                driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng,
-                customer_name, customer_phone,
-                created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        `, [
+        // --- Gunakan object mapping agar kolom & nilai selalu sinkron ---
+        const fields = {
             order_id,
-            body.order_status || 'PENDING',
-            body.order_date || now,
-            body.order_note || null,
-            body.service_type || null,
-            body.service_name || null,
-            body.service_description || null,
-            body.origin_address || null,
-            body.origin_lat || null,
-            body.origin_lng || null,
-            body.destination_address || null,
-            body.destination_lat || null,
-            body.destination_lng || null,
-            body.distance_km || null,
-            body.estimated_duration_min || null,
-            body.base_price || 0,
-            body.service_fee || 0,
-            body.discount || 0,
-            body.total_price || 0,
-            body.payment_method || null,
-            body.payment_status || 'UNPAID',
-            body.partner_reff || null,
-            body.mitra_id || null,
-            body.mitra_name || null,
-            body.mitra_phone || null,
-            body.driver_id || null,
-            body.driver_name || null,
-            body.driver_phone || null,
-            body.driver_photo || null,
-            body.driver_address || null,
-            body.driver_lat || null,
-            body.driver_lng || null,
-            body.customer_name || null,
-            body.customer_phone || null,
-            now,
-            now,
-        ]);
+            order_status: (body.order_status || 'PENDING').toUpperCase(),
+            order_date: body.order_date || now,
+            order_note: body.order_note || null,
+            service_type: body.service_type || null,
+            service_name: body.service_name || null,
+            service_description: body.service_description || null,
+            origin_address: body.origin_address || null,
+            origin_lat: body.origin_lat ?? null,
+            origin_lng: body.origin_lng ?? null,
+            destination_address: body.destination_address || null,
+            destination_lat: body.destination_lat ?? null,
+            destination_lng: body.destination_lng ?? null,
+            distance_km: body.distance_km ?? null,
+            estimated_duration_min: body.estimated_duration_min ?? null,
+            base_price: body.base_price ?? 0,
+            service_fee: body.service_fee ?? 0,
+            discount: body.discount ?? 0,
+            total_price: body.total_price ?? 0,
+            payment_method: body.payment_method || null,
+            payment_status: (body.payment_status || 'UNPAID').toUpperCase(),
+            partner_reff: body.partner_reff || null,
+            mitra_id: body.mitra_id || null,
+            mitra_name: body.mitra_name || null,
+            mitra_phone: body.mitra_phone || null,
+            driver_id: body.driver_id || null,
+            driver_name: body.driver_name || null,
+            driver_phone: body.driver_phone || null,
+            driver_photo: body.driver_photo || null,
+            driver_address: body.driver_address || null,
+            driver_lat: body.driver_lat ?? null,
+            driver_lng: body.driver_lng ?? null,
+            customer_name: body.customer_name,
+            customer_phone: body.customer_phone,
+            created_at: now,
+            updated_at: now,
+        };
 
-        res.status(201).json({ success: true, message: 'Order berhasil dibuat', order_id, insert_id: dbResult.insertId });
+        const columns = Object.keys(fields).join(', ');
+        const placeholders = Object.keys(fields).map(() => '?').join(', ');
+        const values = Object.values(fields);
+
+        const [dbResult] = await pool.execute(
+            `INSERT INTO orders (${columns}) VALUES (${placeholders})`,
+            values
+        );
+
+        console.log(`✅ [ORDERS-CREATE] Order created: ${order_id}`);
+        res.status(201).json({
+            success: true,
+            message: 'Order berhasil dibuat',
+            order_id,
+            insert_id: dbResult.insertId
+        });
 
     } catch (err) {
         console.error('❌ [ORDERS-CREATE] Error:', err.message);
@@ -1062,10 +1099,23 @@ app.post('/orders', async (req, res) => {
 // ============================================================
 // ENDPOINT: GET /orders (list orders dengan filter)
 // ============================================================
-app.get('/orders', async (req, res) => {
+app.get('/orders', checkDb, async (req, res) => {
     const { driver_id, mitra_id, status, limit = 50, offset = 0 } = req.query;
 
     try {
+        // --- Validasi status jika dikirim ---
+        if (status && !VALID_ORDER_STATUSES.includes(status.toUpperCase())) {
+            return res.status(400).json({
+                success: false,
+                error: 'Status tidak valid',
+                valid: VALID_ORDER_STATUSES
+            });
+        }
+
+        // --- Validasi & sanitasi limit/offset ---
+        const limitVal = Math.min(Math.max(1, parseInt(limit) || 50), 200); // max 200
+        const offsetVal = Math.max(0, parseInt(offset) || 0);
+
         const where = [];
         const params = [];
 
@@ -1074,10 +1124,6 @@ app.get('/orders', async (req, res) => {
         if (status) { where.push('order_status = ?'); params.push(status.toUpperCase()); }
 
         const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
-        // Inline LIMIT/OFFSET as integers directly in the query string
-        const limitVal = Math.max(1, parseInt(limit) || 50);
-        const offsetVal = Math.max(0, parseInt(offset) || 0);
 
         const [results] = await pool.query(
             `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`,
@@ -1095,11 +1141,14 @@ app.get('/orders', async (req, res) => {
 // ============================================================
 // ENDPOINT: GET /orders/:order_id (detail order)
 // ============================================================
-app.get('/orders/:order_id', async (req, res) => {
+app.get('/orders/:order_id', checkDb, async (req, res) => {
     const { order_id } = req.params;
 
     try {
-        const [rows] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [order_id]);
+        const [rows] = await pool.execute(
+            'SELECT * FROM orders WHERE order_id = ?',
+            [order_id]
+        );
 
         if (!rows.length) {
             return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
@@ -1116,11 +1165,28 @@ app.get('/orders/:order_id', async (req, res) => {
 // ============================================================
 // ENDPOINT: PUT /orders/:order_id (update order)
 // ============================================================
-app.put('/orders/:order_id', async (req, res) => {
+app.put('/orders/:order_id', checkDb, async (req, res) => {
     const { order_id } = req.params;
     const body = req.body;
 
     try {
+        // --- Validasi enum jika dikirim ---
+        if (body.order_status && !VALID_ORDER_STATUSES.includes(body.order_status.toUpperCase())) {
+            return res.status(400).json({
+                success: false,
+                error: 'order_status tidak valid',
+                valid: VALID_ORDER_STATUSES
+            });
+        }
+
+        if (body.payment_status && !VALID_PAYMENT_STATUSES.includes(body.payment_status.toUpperCase())) {
+            return res.status(400).json({
+                success: false,
+                error: 'payment_status tidak valid',
+                valid: VALID_PAYMENT_STATUSES
+            });
+        }
+
         const allowedFields = [
             'order_status', 'order_note',
             'origin_address', 'origin_lat', 'origin_lng',
@@ -1129,7 +1195,8 @@ app.put('/orders/:order_id', async (req, res) => {
             'base_price', 'service_fee', 'discount', 'total_price',
             'payment_method', 'payment_status', 'partner_reff',
             'mitra_id', 'mitra_name', 'mitra_phone',
-            'driver_id', 'driver_name', 'driver_phone', 'driver_photo', 'driver_address', 'driver_lat', 'driver_lng',
+            'driver_id', 'driver_name', 'driver_phone', 'driver_photo',
+            'driver_address', 'driver_lat', 'driver_lng',
             'customer_name', 'customer_phone',
         ];
 
@@ -1139,16 +1206,26 @@ app.put('/orders/:order_id', async (req, res) => {
         for (const field of allowedFields) {
             if (body[field] !== undefined) {
                 setClauses.push(`${field} = ?`);
-                values.push(body[field]);
+
+                // Normalisasi enum ke uppercase
+                if (field === 'order_status' || field === 'payment_status') {
+                    values.push(body[field].toUpperCase());
+                } else {
+                    values.push(body[field]);
+                }
             }
         }
 
         if (!setClauses.length) {
-            return res.status(400).json({ success: false, message: 'Tidak ada field valid untuk diupdate' });
+            return res.status(400).json({
+                success: false,
+                message: 'Tidak ada field valid untuk diupdate'
+            });
         }
 
         setClauses.push('updated_at = ?');
-        values.push(mysqlNow(), order_id);
+        values.push(mysqlNow()); // updated_at
+        values.push(order_id);  // WHERE order_id = ?
 
         const [result] = await pool.execute(
             `UPDATE orders SET ${setClauses.join(', ')} WHERE order_id = ?`,
@@ -1159,6 +1236,7 @@ app.put('/orders/:order_id', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
         }
 
+        console.log(`✅ [ORDERS-UPDATE] Order updated: ${order_id}`);
         res.json({ success: true, message: 'Order berhasil diupdate', order_id });
 
     } catch (err) {
