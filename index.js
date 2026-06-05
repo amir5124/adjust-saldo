@@ -1651,48 +1651,41 @@ app.get('/drivers', async (req, res) => {
 // ============================================================
 app.post('/driver-confirmation', async (req, res) => {
     const { order_id, driver_id, driver_name, driver_phone, customer_name, total_amount, jumlah_toko } = req.body;
-
-    // NORMALISASI NOMOR DRIVER
     const normalizedDriverPhone = normalizePhoneNumber(driver_phone);
 
     console.log(`\n📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
-    console.log(`   Original phone: ${driver_phone} -> Normalized: ${normalizedDriverPhone}`);
 
+    // ✅ Simpan konfirmasi ke memory
     driverConfirmations.set(order_id, {
-        driver_id,
-        driver_name,
-        driver_phone: normalizedDriverPhone,  // Simpan dalam format normal
-        customer_name,
-        total_amount,
-        jumlah_toko,
-        status: 'pending',
-        timestamp: Date.now(),
-        expiresAt: Date.now() + (3 * 60 * 1000)
+        driver_id, driver_name, driver_phone: normalizedDriverPhone,
+        customer_name, total_amount, jumlah_toko,
+        status: 'pending', timestamp: Date.now(), expiresAt: Date.now() + (3 * 60 * 1000)
     });
 
-    // Send using Quick Reply Template
-    const variables = {
-        "1": driver_name,
-        "2": customer_name,
-        "3": total_amount,
-        "4": jumlah_toko.toString()
-    };
+    // ✅ UPDATE: Assign driver ke order yang sudah ada (jika order sudah tersimpan)
+    try {
+        const [result] = await pool.execute(`
+            UPDATE orders SET 
+                driver_id = ?, driver_name = ?, driver_phone = ?,
+                updated_at = ?
+            WHERE order_id = ? AND driver_id IS NULL
+        `, [driver_id, driver_name, normalizedDriverPhone, mysqlNow(), order_id]);
 
-    const result = await sendWhatsAppTemplate(
-        driver_phone,
-        CONFIG.templateDriverConfirmation,
-        variables
-    );
-
-    if (result.success) {
-        console.log(`✅ Confirmation sent to driver ${driver_name}`);
-    } else {
-        console.error(`❌ Failed to send confirmation to driver ${driver_name}`);
+        if (result.affectedRows > 0) {
+            console.log(`✅ Driver pre-assigned to order ${order_id} in database`);
+        } else {
+            console.log(`⚠️ Order ${order_id} not yet in database, driver will be assigned when order is created`);
+        }
+    } catch (error) {
+        console.log(`⚠️ Could not pre-assign driver: ${error.message}`);
     }
 
-    res.json({ success: result.success, order_id, ...result });
-});
+    // Kirim template WhatsApp ke driver
+    const variables = { "1": driver_name, "2": customer_name, "3": total_amount, "4": jumlah_toko.toString() };
+    const whatsappResult = await sendWhatsAppTemplate(driver_phone, CONFIG.templateDriverConfirmation, variables);
 
+    res.json({ success: whatsappResult.success, order_id, ...whatsappResult });
+});
 // ============================================================
 // ENDPOINT: POST /send-order-details (USING TEMPLATE)
 // ============================================================
@@ -2048,110 +2041,57 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
 
     try {
-        // Ambil detail order dari database
-        let [orders] = await pool.execute(
-            'SELECT * FROM orders WHERE order_id = ?',
-            [orderId]
-        );
-
-        // ✅ FIX: Jika order belum ada, BUAT dari data confirmation
-        if (orders.length === 0) {
-            console.log(`⚠️ Order ${orderId} not found, CREATING from confirmation data...`);
-
-            const now = mysqlNow();
-
-            // Parse total amount dari string "Rp 21.000" ke angka 21000
-            let parsedTotal = 21000; // default
-            if (confirmation.total_amount) {
-                parsedTotal = parseInt(confirmation.total_amount.replace(/\D/g, '')) || 21000;
-            }
-
-            // Buat order baru
-            await pool.execute(`
-                INSERT INTO orders (
-                    order_id, order_status, order_date, order_note,
-                    customer_name, customer_phone, total_price, payment_status,
-                    driver_id, driver_name, driver_phone,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [
-                orderId,
-                'CONFIRMED',  // Langsung CONFIRMED karena driver sudah ACCEPT
-                now,
-                confirmation.order_note || 'Auto created from driver confirmation',
-                confirmation.customer_name,
-                confirmation.customer_phone || '082323907426',
-                parsedTotal,
-                'PAID',
-                confirmation.driver_id,
-                confirmation.driver_name,
-                confirmation.driver_phone,
-                now,
-                now
-            ]);
-
-            console.log(`✅ Order ${orderId} CREATED automatically from confirmation`);
-
-            // Ambil ulang data order
-            [orders] = await pool.execute(
-                'SELECT * FROM orders WHERE order_id = ?',
-                [orderId]
-            );
-        }
+        // Cari order di database
+        let [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [orderId]);
 
         if (orders.length === 0) {
-            console.error(`❌ Failed to create or find order ${orderId}`);
+            console.log(`⚠️ Order ${orderId} not found, cannot send details yet`);
+            console.log(`   Driver ${confirmation.driver_name} will get details when order is created`);
             return;
         }
 
         const order = orders[0];
 
-        // ✅ UPDATE: Assign driver ke order dan ubah status ke CONFIRMED (jika belum)
-        if (!order.driver_id || order.order_status !== 'CONFIRMED') {
+        // ✅ Update driver jika belum ada
+        if (!order.driver_id) {
             await pool.execute(`
                 UPDATE orders SET 
-                    driver_id = ?,
-                    driver_name = ?,
-                    driver_phone = ?,
-                    order_status = 'CONFIRMED',
-                    updated_at = ?
+                    driver_id = ?, driver_name = ?, driver_phone = ?,
+                    order_status = 'CONFIRMED', updated_at = ?
                 WHERE order_id = ?
-            `, [
-                confirmation.driver_id,
-                confirmation.driver_name,
-                confirmation.driver_phone,
-                mysqlNow(),
-                orderId
-            ]);
-            console.log(`✅ Driver ${confirmation.driver_name} assigned to order ${orderId}, status: CONFIRMED`);
+            `, [confirmation.driver_id, confirmation.driver_name, confirmation.driver_phone, mysqlNow(), orderId]);
+            console.log(`✅ Driver ${confirmation.driver_name} assigned to order ${orderId}`);
         }
 
-        // Kirim template WhatsApp ke driver
-        const variables = {
+        // Kirim detail ke driver
+        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
             "1": confirmation.driver_name,
             "2": order.customer_name,
             "3": order.customer_phone,
             "4": orderId,
             "5": "Detail pesanan: " + (order.order_note || '-'),
-            "6": formatRupiah(order.total_price || parsedTotal)
-        };
+            "6": formatRupiah(order.total_price)
+        });
 
-        await sendWhatsAppTemplate(
-            confirmation.driver_phone,
-            CONFIG.templateDriverOrderAccepted,
-            variables
-        );
+        // Notifikasi ke customer
+        const message = `🚗 *DRIVER TELAH DITUGASKAN!*
+━━━━━━━━━━━━━━━━━━━━━
+Halo *${order.customer_name}*,
 
-        console.log(`✅ Order details sent to driver`);
+Driver *${confirmation.driver_name}* telah ditugaskan!
 
-        // Kirim notifikasi ke customer
-        await sendCustomerDriverAssignedNotification(order, confirmation);
+Order ID: ${order.order_id}
+Total: ${formatRupiah(order.total_price)}
+
+Driver akan segera menghubungi Anda. 🙏`;
+
+        await sendWhatsAppFreeForm(order.customer_phone, message);
+        console.log(`✅ Customer notification sent`);
 
     } catch (error) {
-        console.error(`❌ Error sending order details:`, error.message);
+        console.error(`❌ Error:`, error.message);
     }
 }
-
 // ============================================================
 // FUNGSI NOTIFIKASI KE CUSTOMER BAHWA DRIVER SUDAH DIASSIGN
 // ============================================================
