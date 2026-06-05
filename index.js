@@ -804,53 +804,62 @@ app.put('/orders/:order_id', async (req, res) => {
 // ENDPOINT: POST /driver-confirmation (UPDATED - DENGAN DATA LENGKAP)
 // ============================================================
 app.post('/driver-confirmation', async (req, res) => {
-    const {
-        order_id, driver_id, driver_name, driver_phone,
-        customer_name, total_amount, jumlah_toko,
-        order_data  // ✅ TAMBAHKAN: data lengkap order dari frontend
-    } = req.body;
+    const { order_id, driver_id, driver_name, driver_phone, customer_name, customer_phone, total_amount, jumlah_toko, order_data } = req.body;
+
+    console.log(`\n🔍 [DRIVER-CONFIRMATION] Checking order ${order_id} in DB...`);
+
+    // ✅ CEK ORDER DI DB DULU
+    try {
+        const [existing] = await pool.execute('SELECT order_id, customer_name, customer_phone FROM orders WHERE order_id = ?', [order_id]);
+        if (existing.length === 0) {
+            console.error(`❌ ORDER ${order_id} TIDAK ADA DI DB SAAT driver-confirmation dipanggil!`);
+            console.error(`   Ini berarti POST /orders belum selesai atau gagal`);
+
+            // Return error ke frontend supaya frontend tahu
+            return res.status(404).json({
+                success: false,
+                error: `Order ${order_id} belum ada di database. POST /orders harus dipanggil lebih dulu.`,
+                order_id
+            });
+        }
+        console.log(`✅ Order ${order_id} found in DB, customer: ${existing[0].customer_name}`);
+    } catch (dbErr) {
+        console.error(`❌ DB check error: ${dbErr.message}`);
+        return res.status(500).json({ success: false, error: dbErr.message });
+    }
 
     const normalizedDriverPhone = normalizePhoneNumber(driver_phone);
+    const normalizedCustomerPhone = normalizePhoneNumber(customer_phone);
 
-    console.log(`\n📋 [DRIVER-CONFIRMATION] Order: ${order_id}, Driver: ${driver_name}`);
-    console.log(`   Order data received:`, JSON.stringify(order_data, null, 2));
-
-    // ✅ SIMPAN data lengkap order ke confirmation object
     driverConfirmations.set(order_id, {
         driver_id,
         driver_name,
         driver_phone: normalizedDriverPhone,
         customer_name,
+        customer_phone: normalizedCustomerPhone,  // ✅ SIMPAN customer_phone!
         total_amount,
         jumlah_toko,
-        order_data: order_data || {},  // ✅ Simpan data lengkap order
+        order_data: order_data || {},
         status: 'pending',
         timestamp: Date.now(),
         expiresAt: Date.now() + (3 * 60 * 1000)
     });
 
-    // Pre-assign driver jika order sudah ada di database
+    // Pre-assign driver
     try {
-        const [result] = await pool.execute(`
-            UPDATE orders SET 
-                driver_id = ?, driver_name = ?, driver_phone = ?, 
-                updated_at = ?
+        await pool.execute(`
+            UPDATE orders SET driver_id = ?, driver_name = ?, driver_phone = ?, updated_at = ?
             WHERE order_id = ? AND driver_id IS NULL
         `, [driver_id, driver_name, normalizedDriverPhone, mysqlNow(), order_id]);
-
-        if (result.affectedRows > 0) {
-            console.log(`✅ Driver pre-assigned to order ${order_id} in database`);
-        }
     } catch (error) {
-        console.log(`⚠️ Could not pre-assign driver: ${error.message}`);
+        console.log(`⚠️ Pre-assign error: ${error.message}`);
     }
 
-    // Kirim template WhatsApp ke driver
     const variables = {
         "1": driver_name,
         "2": customer_name,
         "3": total_amount,
-        "4": jumlah_toko.toString()
+        "4": (jumlah_toko || 1).toString()
     };
 
     const whatsappResult = await sendWhatsAppTemplate(driver_phone, CONFIG.templateDriverConfirmation, variables);
