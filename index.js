@@ -1074,12 +1074,16 @@ app.get('/orders', async (req, res) => {
         if (status) { where.push('order_status = ?'); params.push(status.toUpperCase()); }
 
         const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-        params.push(parseInt(limit), parseInt(offset));
 
-        const [results] = await pool.execute(
-            `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        // Inline LIMIT/OFFSET as integers directly in the query string
+        const limitVal = Math.max(1, parseInt(limit) || 50);
+        const offsetVal = Math.max(0, parseInt(offset) || 0);
+
+        const [results] = await pool.query(
+            `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`,
             params
         );
+
         res.json({ success: true, count: results.length, data: results });
 
     } catch (err) {
