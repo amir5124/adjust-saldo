@@ -998,7 +998,7 @@ const VALID_PAYMENT_STATUSES = ['UNPAID', 'PAID', 'REFUNDED', 'FAILED'];
 // ============================================================
 // ENDPOINT: POST /orders (buat order baru)
 // ============================================================
-app.post('/orders', checkDb, async (req, res) => {
+app.post('/orders', async (req, res) => {
     console.log('\n🛒 [ORDERS-CREATE] Request received:', JSON.stringify(req.body, null, 2));
 
     try {
@@ -1099,7 +1099,7 @@ app.post('/orders', checkDb, async (req, res) => {
 // ============================================================
 // ENDPOINT: GET /orders (list orders dengan filter)
 // ============================================================
-app.get('/orders', checkDb, async (req, res) => {
+app.get('/orders', async (req, res) => {
     const { driver_id, mitra_id, status, limit = 50, offset = 0 } = req.query;
 
     try {
@@ -1141,7 +1141,7 @@ app.get('/orders', checkDb, async (req, res) => {
 // ============================================================
 // ENDPOINT: GET /orders/:order_id (detail order)
 // ============================================================
-app.get('/orders/:order_id', checkDb, async (req, res) => {
+app.get('/orders/:order_id', async (req, res) => {
     const { order_id } = req.params;
 
     try {
@@ -1165,7 +1165,7 @@ app.get('/orders/:order_id', checkDb, async (req, res) => {
 // ============================================================
 // ENDPOINT: PUT /orders/:order_id (update order)
 // ============================================================
-app.put('/orders/:order_id', checkDb, async (req, res) => {
+app.put('/orders/:order_id', async (req, res) => {
     const { order_id } = req.params;
     const body = req.body;
 
