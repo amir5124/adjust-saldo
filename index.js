@@ -894,8 +894,8 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Pesanan telah dikonfirmasi.');
 
         // Panggil fungsi yang sudah dibuat
-        await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
-        await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
+        // await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
+        // await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
     } else if (foundOrderId && foundConfirmation && (message === 'REJECT' || message === 'TOLAK' || message === 'NO')) {
         foundConfirmation.status = 'rejected';
         driverConfirmations.set(foundOrderId, foundConfirmation);
