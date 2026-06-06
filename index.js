@@ -353,6 +353,89 @@ app.post('/create-qris', async (req, res) => {
 });
 
 // ============================================================
+// ENDPOINT: GET /check-status/:partner_reff
+// ============================================================
+app.get('/check-status/:partner_reff', async (req, res) => {
+    const { partner_reff } = req.params;
+
+    console.log(`\n🔍 [CHECK-STATUS] Checking: ${partner_reff}`);
+
+    if (!partner_reff) {
+        return res.status(400).json({
+            rc: '01',
+            message: 'partner_reff diperlukan'
+        });
+    }
+
+    try {
+        let transaction = null;
+
+        // Cek di tabel inquiry_va
+        let [rows] = await pool.execute(
+            `SELECT partner_reff, status, amount, bank_code as method, created_at 
+             FROM inquiry_va 
+             WHERE partner_reff = ?`,
+            [partner_reff]
+        );
+
+        if (rows.length > 0) {
+            transaction = { ...rows[0], type: 'VA' };
+        }
+
+        // Jika tidak ditemukan, cek di tabel inquiry_qris
+        if (!transaction) {
+            [rows] = await pool.execute(
+                `SELECT partner_reff, status, amount, created_at 
+                 FROM inquiry_qris 
+                 WHERE partner_reff = ?`,
+                [partner_reff]
+            );
+            if (rows.length > 0) {
+                transaction = { ...rows[0], type: 'QRIS', method: 'QRIS' };
+            }
+        }
+
+        // Jika tetap tidak ditemukan
+        if (!transaction) {
+            console.log(`❌ Transaction not found: ${partner_reff}`);
+            return res.status(404).json({
+                rc: '404',
+                message: 'Transaksi tidak ditemukan',
+                data: null
+            });
+        }
+
+        // Map status database ke status response
+        const status_trx = transaction.status === 'SUKSES' ? 'success' : 'pending';
+
+        console.log(`✅ Transaction found: ${partner_reff}, status: ${transaction.status}`);
+
+        res.json({
+            rc: '00',
+            message: 'Success',
+            data: {
+                partner_reff: transaction.partner_reff,
+                type: transaction.type,
+                method: transaction.method,
+                status_trx: status_trx,
+                status_db: transaction.status,
+                amount: transaction.amount,
+                created_at: transaction.created_at,
+                checked_at: new Date().toISOString(),
+            }
+        });
+
+    } catch (err) {
+        console.error('❌ [CHECK-STATUS] Error:', err.message);
+        res.status(500).json({
+            rc: '99',
+            message: 'Internal server error',
+            error: err.message
+        });
+    }
+});
+
+// ============================================================
 // ENDPOINT: POST /callback (PAYMENT CALLBACK - TAMBAH SALDO KE AMIR)
 // ============================================================
 app.post('/callback', async (req, res) => {
