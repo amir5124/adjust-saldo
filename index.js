@@ -670,7 +670,7 @@ app.get('/drivers', async (req, res) => {
 });
 
 // ============================================================
-// ENDPOINT: POST /orders
+// ENDPOINT: POST /orders (MODIFIED - SAVE ORDER ITEMS)
 // ============================================================
 app.post('/orders', async (req, res) => {
     console.log('\n🛒 [ORDERS-CREATE] Request:', JSON.stringify(req.body, null, 2));
@@ -692,9 +692,15 @@ app.post('/orders', async (req, res) => {
             orderStatus = 'SEARCHING';
         }
 
+        // ✅ Siapkan data items jika ada
+        let orderItemsJson = null;
+        if (body.order_items) {
+            orderItemsJson = typeof body.order_items === 'string' ? body.order_items : JSON.stringify(body.order_items);
+        }
+
         await pool.execute(`
             INSERT INTO orders (
-                order_id, order_status, order_date, order_note,
+                order_id, order_status, order_date, order_note, order_items,
                 service_type, service_name, service_description,
                 origin_address, origin_lat, origin_lng,
                 destination_address, destination_lat, destination_lng,
@@ -705,9 +711,9 @@ app.post('/orders', async (req, res) => {
                 driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng,
                 customer_name, customer_phone,
                 created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `, [
-            order_id, orderStatus, body.order_date || now, body.order_note || null,
+            order_id, orderStatus, body.order_date || now, body.order_note || null, orderItemsJson,
             body.service_type || null, body.service_name || null, body.service_description || null,
             body.origin_address || null, body.origin_lat || null, body.origin_lng || null,
             body.destination_address || null, body.destination_lat || null, body.destination_lng || null,
@@ -964,6 +970,9 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 // ============================================================
 // FUNGSI KIRIM DETAIL ORDER KE DRIVER (TANPA AUTO-CREATE)
 // ============================================================
+// ============================================================
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER (DYNAMIC FROM DATABASE)
+// ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
 
@@ -973,22 +982,68 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             [orderId]
         );
 
-        // ❌ JANGAN BUAT ORDER BARU!
         if (orders.length === 0) {
-            console.error(`❌ Order ${orderId} not found in database! Order harus dibuat terlebih dahulu via POST /orders`);
-            console.log(`   Driver: ${confirmation.driver_name}, Customer: ${confirmation.customer_name}`);
+            console.error(`❌ Order ${orderId} not found in database!`);
             return;
         }
 
         const order = orders[0];
+        const totalAmount = order.total_price;
 
+        // ✅ BUILD DETAIL PESANAN DARI order_items (JSON)
+        let storesDetailText = '';
+
+        if (order.order_items) {
+            try {
+                const orderItems = typeof order.order_items === 'string'
+                    ? JSON.parse(order.order_items)
+                    : order.order_items;
+
+                // Jika order_items adalah array of stores
+                if (Array.isArray(orderItems)) {
+                    for (const store of orderItems) {
+                        const storeName = store.name || store.store?.title || 'Toko';
+                        const distance = store.distance || store.store?.distance || 0;
+                        const ongkir = store.ongkir || calcOngkir(distance);
+
+                        storesDetailText += `🏪 ${storeName}\n`;
+                        storesDetailText += `   📍 Jarak: ${distance.toFixed(1)} km\n`;
+                        storesDetailText += `   🛵 Ongkir: ${formatRupiah(ongkir)}\n`;
+                        storesDetailText += `   🍔 Items:\n`;
+
+                        const items = store.items || Object.values(store).filter(v => v.qty);
+                        let subTotal = 0;
+
+                        for (const item of items) {
+                            const itemName = item.name || item.prod?.title || 'Item';
+                            const itemPrice = item.price || item.prod?.price || 0;
+                            const itemQty = item.qty || 1;
+                            const itemSubtotal = itemPrice * itemQty;
+                            subTotal += itemSubtotal;
+
+                            storesDetailText += `   • ${itemQty}x ${itemName} = ${formatRupiah(itemSubtotal)}\n`;
+                        }
+
+                        storesDetailText += `   📝 Subtotal: ${formatRupiah(subTotal)}\n\n`;
+                    }
+                }
+            } catch (parseError) {
+                console.error('Error parsing order_items:', parseError.message);
+                storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+            }
+        } else {
+            // Fallback: gunakan order_note jika tidak ada order_items
+            storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+        }
+
+        // Kirim template ke driver
         await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
             "1": confirmation.driver_name,
             "2": order.customer_name,
             "3": order.customer_phone,
             "4": orderId,
-            "5": "Detail pesanan: " + (order.order_note || '-'),
-            "6": formatRupiah(order.total_price)
+            "5": storesDetailText,
+            "6": formatRupiah(totalAmount)
         });
 
         console.log(`✅ Order details sent to driver`);
@@ -1001,6 +1056,9 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 // ============================================================
 // FUNGSI NOTIFIKASI KE CUSTOMER (TANPA AUTO-CREATE)
 // ============================================================
+// ============================================================
+// FUNGSI NOTIFIKASI KE CUSTOMER (DYNAMIC FROM DATABASE)
+// ============================================================
 async function notifyCustomerOrderAccepted(orderId, confirmation) {
     console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
 
@@ -1011,19 +1069,64 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
         );
 
         if (orders.length === 0) {
-            console.error(`❌ Order ${orderId} not found in database! Cannot notify customer.`);
+            console.error(`❌ Order ${orderId} not found in database!`);
             return;
         }
 
         const order = orders[0];
+        const totalAmount = order.total_price;
+
+        // ✅ BUILD DETAIL PESANAN SAMA UNTUK CUSTOMER
+        let storesDetailText = '';
+
+        if (order.order_items) {
+            try {
+                const orderItems = typeof order.order_items === 'string'
+                    ? JSON.parse(order.order_items)
+                    : order.order_items;
+
+                if (Array.isArray(orderItems)) {
+                    for (const store of orderItems) {
+                        const storeName = store.name || store.store?.title || 'Toko';
+                        const distance = store.distance || store.store?.distance || 0;
+                        const ongkir = store.ongkir || calcOngkir(distance);
+
+                        storesDetailText += `🏪 ${storeName}\n`;
+                        storesDetailText += `   📍 Jarak: ${distance.toFixed(1)} km\n`;
+                        storesDetailText += `   🛵 Ongkir: ${formatRupiah(ongkir)}\n`;
+                        storesDetailText += `   🍔 Items:\n`;
+
+                        const items = store.items || Object.values(store).filter(v => v.qty);
+                        let subTotal = 0;
+
+                        for (const item of items) {
+                            const itemName = item.name || item.prod?.title || 'Item';
+                            const itemPrice = item.price || item.prod?.price || 0;
+                            const itemQty = item.qty || 1;
+                            const itemSubtotal = itemPrice * itemQty;
+                            subTotal += itemSubtotal;
+
+                            storesDetailText += `   • ${itemQty}x ${itemName} = ${formatRupiah(itemSubtotal)}\n`;
+                        }
+
+                        storesDetailText += `   📝 Subtotal: ${formatRupiah(subTotal)}\n\n`;
+                    }
+                }
+            } catch (parseError) {
+                console.error('Error parsing order_items:', parseError.message);
+                storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+            }
+        } else {
+            storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+        }
 
         await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, {
             "1": order.customer_name,
             "2": confirmation.driver_name,
             "3": confirmation.driver_phone,
             "4": orderId,
-            "5": "Pesanan Anda sedang diproses oleh driver",
-            "6": formatRupiah(order.total_price)
+            "5": storesDetailText,
+            "6": formatRupiah(totalAmount)
         });
 
         console.log(`✅ Customer notification sent to ${order.customer_phone}`);
@@ -1032,7 +1135,6 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
         console.error(`❌ Error sending customer notification:`, error.message);
     }
 }
-
 // ============================================================
 // ENDPOINT: GET /check-confirmation/:orderId
 // ============================================================
