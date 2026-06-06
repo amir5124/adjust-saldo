@@ -670,7 +670,7 @@ app.get('/drivers', async (req, res) => {
 });
 
 // ============================================================
-// ENDPOINT: POST /orders (MODIFIED - SAVE ORDER ITEMS)
+// ENDPOINT: POST /orders
 // ============================================================
 app.post('/orders', async (req, res) => {
     console.log('\n🛒 [ORDERS-CREATE] Request:', JSON.stringify(req.body, null, 2));
@@ -692,15 +692,9 @@ app.post('/orders', async (req, res) => {
             orderStatus = 'SEARCHING';
         }
 
-        // ✅ Siapkan data items jika ada
-        let orderItemsJson = null;
-        if (body.order_items) {
-            orderItemsJson = typeof body.order_items === 'string' ? body.order_items : JSON.stringify(body.order_items);
-        }
-
         await pool.execute(`
             INSERT INTO orders (
-                order_id, order_status, order_date, order_note, order_items,
+                order_id, order_status, order_date, order_note,
                 service_type, service_name, service_description,
                 origin_address, origin_lat, origin_lng,
                 destination_address, destination_lat, destination_lng,
@@ -711,9 +705,9 @@ app.post('/orders', async (req, res) => {
                 driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng,
                 customer_name, customer_phone,
                 created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `, [
-            order_id, orderStatus, body.order_date || now, body.order_note || null, orderItemsJson,
+            order_id, orderStatus, body.order_date || now, body.order_note || null,
             body.service_type || null, body.service_name || null, body.service_description || null,
             body.origin_address || null, body.origin_lat || null, body.origin_lng || null,
             body.destination_address || null, body.destination_lat || null, body.destination_lng || null,
