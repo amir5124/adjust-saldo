@@ -1218,6 +1218,24 @@ driver_phone = VALUES(driver_phone), order_status = 'CONFIRMED', updated_at = NO
 });
 
 // ============================================================
+// DEBUG: Cek isi template Twilio
+// ============================================================
+app.get('/debug/template/:sid', async (req, res) => {
+    const { sid } = req.params;
+    try {
+        const template = await twilioClient.content.v1.contents(sid).fetch();
+        res.json({
+            sid: template.sid,
+            friendly_name: template.friendlyName,
+            types: template.types,
+            variables: template.variables
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ============================================================
 // START SERVER
 // ============================================================
 const PORT = CONFIG.port;
