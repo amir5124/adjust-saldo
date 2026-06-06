@@ -1002,13 +1002,11 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 
                 if (Array.isArray(orderItems) && orderItems.length > 0) {
                     const storeParts = [];
-
                     for (const store of orderItems) {
                         const storeName = store.name || store.store?.title || 'Toko';
                         const distance = parseFloat(store.distance || store.store?.distance || 0);
                         const ongkir = store.ongkir || (distance <= 3 ? 9500 : 9500 + Math.round((distance - 3) * 3500));
                         const items = store.items || [];
-
                         let subTotal = 0;
                         const itemLines = [];
                         for (const item of items) {
@@ -1017,42 +1015,63 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
                             subTotal += itemPrice * itemQty;
                             itemLines.push(`${itemQty}x ${item.name} Rp${(itemPrice * itemQty).toLocaleString('id-ID')}`);
                         }
-
-                        // ✅ SATU BARIS per toko, NO newline
                         storeParts.push(
                             `[${storeName}] ${distance.toFixed(1)}km, ongkir Rp${ongkir.toLocaleString('id-ID')} | ` +
                             `${itemLines.join(', ')} | Subtotal Rp${subTotal.toLocaleString('id-ID')}`
                         );
                     }
-
                     storesDetailText = storeParts.join(' || ');
                 }
             } catch (e) {
-                console.error('Parse error:', e.message);
                 storesDetailText = order.order_note || '-';
             }
         } else {
             storesDetailText = order.order_note || '-';
         }
 
-        // ✅ FINAL SAFETY: strip semua newline yang mungkin tersisa
         storesDetailText = storesDetailText.replace(/\r?\n|\r/g, ' ').trim();
         if (storesDetailText.length > 1500) storesDetailText = storesDetailText.substring(0, 1497) + '...';
 
         const customerPhoneDisplay = formatPhoneDisplay(order.customer_phone);
 
-        const variables = {
+        // ✅ PESAN 1: Template seperti biasa
+        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
             "1": String(confirmation.driver_name || 'Driver'),
             "2": String(order.customer_name || '-'),
             "3": String(customerPhoneDisplay),
             "4": String(orderId),
             "5": String(storesDetailText),
             "6": String(formatRupiah(order.total_price))
-        };
+        });
 
-        console.log(`📤 [DRIVER] Variables["5"] =`, variables["5"]);
+        // ✅ PESAN 2: Link rute Google Maps (free-form, bisa diklik)
+        const originLat = order.origin_lat;
+        const originLng = order.origin_lng;
+        const destLat = order.destination_lat;
+        const destLng = order.destination_lng;
 
-        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, variables);
+        if (originLat && originLng && destLat && destLng) {
+            // Link ke toko dulu, lalu ke customer
+            const linkKeToko = `https://www.google.com/maps/dir/?api=1&destination=${originLat},${originLng}&travelmode=driving`;
+            const linkKeCustomer = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${destLat},${destLng}&travelmode=driving`;
+
+            const routeMsg =
+                `🗺️ *RUTE PENGANTARAN*\n\n` +
+                `📍 *1. Menuju Toko:*\n` +
+                `${order.origin_address || 'Alamat toko'}\n` +
+                `${linkKeToko}\n\n` +
+                `🏠 *2. Menuju Customer:*\n` +
+                `${order.destination_address || 'Alamat customer'}\n` +
+                `${linkKeCustomer}`;
+
+            // Delay 1 detik agar pesan tidak bertumpuk
+            await new Promise(r => setTimeout(r, 1000));
+            await sendWhatsAppFreeForm(confirmation.driver_phone, routeMsg);
+            console.log(`✅ Route links sent to driver`);
+        } else {
+            console.warn(`⚠️ Koordinat tidak lengkap, skip kirim rute`);
+        }
+
         console.log(`✅ Order details sent to driver`);
     } catch (error) {
         console.error(`❌ Error sendOrderDetailsToDriver:`, error.message);
