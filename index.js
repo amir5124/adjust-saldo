@@ -993,143 +993,141 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
         if (orders.length === 0) { console.error(`❌ Order ${orderId} not found!`); return; }
 
         const order = orders[0];
-        let storesDetailText = '';
+        let storesDetailText = '-';
 
         if (order.order_items) {
             try {
                 const orderItems = typeof order.order_items === 'string'
                     ? JSON.parse(order.order_items) : order.order_items;
 
-                if (Array.isArray(orderItems)) {
+                if (Array.isArray(orderItems) && orderItems.length > 0) {
+                    const storeParts = [];
+
                     for (const store of orderItems) {
                         const storeName = store.name || store.store?.title || 'Toko';
                         const distance = parseFloat(store.distance || store.store?.distance || 0);
                         const ongkir = store.ongkir || (distance <= 3 ? 9500 : 9500 + Math.round((distance - 3) * 3500));
+                        const items = store.items || [];
 
-                        storesDetailText += `🏪 ${storeName}\n`;
-                        storesDetailText += ` 📍 Jarak: ${distance.toFixed(1)} km\n`;
-                        storesDetailText += ` 🛵 Ongkir: ${formatRupiah(ongkir)}\n`;
-                        storesDetailText += ` 🍔 Items:\n`;
-
-                        const items = store.items || [];  // ✅ tidak pakai Object.values filter qty
                         let subTotal = 0;
+                        const itemLines = [];
                         for (const item of items) {
-                            const itemName = item.name || 'Item';
                             const itemPrice = item.price || 0;
                             const itemQty = item.qty || 1;
-                            const itemSubtotal = itemPrice * itemQty;
-                            subTotal += itemSubtotal;
-                            storesDetailText += ` • ${itemQty}x ${itemName} = ${formatRupiah(itemSubtotal)}\n`;
+                            subTotal += itemPrice * itemQty;
+                            itemLines.push(`${itemQty}x ${item.name} Rp${(itemPrice * itemQty).toLocaleString('id-ID')}`);
                         }
-                        storesDetailText += ` 📝 Subtotal: ${formatRupiah(subTotal)}\n\n`;
+
+                        // ✅ SATU BARIS per toko, NO newline
+                        storeParts.push(
+                            `[${storeName}] ${distance.toFixed(1)}km, ongkir Rp${ongkir.toLocaleString('id-ID')} | ` +
+                            `${itemLines.join(', ')} | Subtotal Rp${subTotal.toLocaleString('id-ID')}`
+                        );
                     }
+
+                    storesDetailText = storeParts.join(' || ');
                 }
             } catch (e) {
-                storesDetailText = 'Detail: ' + (order.order_note || '-');
+                console.error('Parse error:', e.message);
+                storesDetailText = order.order_note || '-';
             }
         } else {
-            storesDetailText = 'Detail: ' + (order.order_note || '-');
+            storesDetailText = order.order_note || '-';
         }
 
-        // ✅ FIX: nomor customer dalam format 08xxx
+        // ✅ FINAL SAFETY: strip semua newline yang mungkin tersisa
+        storesDetailText = storesDetailText.replace(/\r?\n|\r/g, ' ').trim();
+        if (storesDetailText.length > 1500) storesDetailText = storesDetailText.substring(0, 1497) + '...';
+
         const customerPhoneDisplay = formatPhoneDisplay(order.customer_phone);
 
-        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
-            "1": confirmation.driver_name,
-            "2": order.customer_name,
-            "3": customerPhoneDisplay,   // ✅ 085600402341 bukan 6285600402341
-            "4": orderId,
-            "5": storesDetailText,
-            "6": formatRupiah(order.total_price)
-        });
-        console.log(`✅ Order details sent, customer: ${customerPhoneDisplay}`);
+        const variables = {
+            "1": String(confirmation.driver_name || 'Driver'),
+            "2": String(order.customer_name || '-'),
+            "3": String(customerPhoneDisplay),
+            "4": String(orderId),
+            "5": String(storesDetailText),
+            "6": String(formatRupiah(order.total_price))
+        };
+
+        console.log(`📤 [DRIVER] Variables["5"] =`, variables["5"]);
+
+        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, variables);
+        console.log(`✅ Order details sent to driver`);
     } catch (error) {
-        console.error(`❌ Error:`, error.message);
+        console.error(`❌ Error sendOrderDetailsToDriver:`, error.message);
     }
 }
-// ============================================================
-// FUNGSI NOTIFIKASI KE CUSTOMER (TANPA AUTO-CREATE)
-// ============================================================
-// ============================================================
-// FUNGSI NOTIFIKASI KE CUSTOMER (DYNAMIC FROM DATABASE)
-// ============================================================
+
 async function notifyCustomerOrderAccepted(orderId, confirmation) {
     console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
-
     try {
-        const [orders] = await pool.execute(
-            'SELECT * FROM orders WHERE order_id = ?',
-            [orderId]
-        );
-
-        if (orders.length === 0) {
-            console.error(`❌ Order ${orderId} not found in database!`);
-            return;
-        }
+        const [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [orderId]);
+        if (orders.length === 0) { console.error(`❌ Order ${orderId} not found!`); return; }
 
         const order = orders[0];
-        const totalAmount = order.total_price;
-
-        // ✅ BUILD DETAIL PESANAN SAMA UNTUK CUSTOMER
-        let storesDetailText = '';
+        let storesDetailText = '-';
 
         if (order.order_items) {
             try {
                 const orderItems = typeof order.order_items === 'string'
-                    ? JSON.parse(order.order_items)
-                    : order.order_items;
+                    ? JSON.parse(order.order_items) : order.order_items;
 
-                if (Array.isArray(orderItems)) {
+                if (Array.isArray(orderItems) && orderItems.length > 0) {
+                    const storeParts = [];
+
                     for (const store of orderItems) {
                         const storeName = store.name || store.store?.title || 'Toko';
-                        const distance = store.distance || store.store?.distance || 0;
-                        const ongkir = store.ongkir || calcOngkir(distance);
+                        const distance = parseFloat(store.distance || store.store?.distance || 0);
+                        const ongkir = store.ongkir || (distance <= 3 ? 9500 : 9500 + Math.round((distance - 3) * 3500));
+                        const items = store.items || [];
 
-                        storesDetailText += `🏪 ${storeName}\n`;
-                        storesDetailText += ` 📍 Jarak: ${distance.toFixed(1)} km\n`;
-                        storesDetailText += ` 🛵 Ongkir: ${formatRupiah(ongkir)}\n`;
-                        storesDetailText += ` 🍔 Items:\n`;
-
-                        const items = store.items || Object.values(store).filter(v => v.qty);
                         let subTotal = 0;
-
+                        const itemLines = [];
                         for (const item of items) {
-                            const itemName = item.name || item.prod?.title || 'Item';
-                            const itemPrice = item.price || item.prod?.price || 0;
+                            const itemPrice = item.price || 0;
                             const itemQty = item.qty || 1;
-                            const itemSubtotal = itemPrice * itemQty;
-                            subTotal += itemSubtotal;
-
-                            storesDetailText += ` • ${itemQty}x ${itemName} = ${formatRupiah(itemSubtotal)}\n`;
+                            subTotal += itemPrice * itemQty;
+                            itemLines.push(`${itemQty}x ${item.name} Rp${(itemPrice * itemQty).toLocaleString('id-ID')}`);
                         }
 
-                        storesDetailText += ` 📝 Subtotal: ${formatRupiah(subTotal)}\n\n`;
+                        storeParts.push(
+                            `[${storeName}] ${distance.toFixed(1)}km, ongkir Rp${ongkir.toLocaleString('id-ID')} | ` +
+                            `${itemLines.join(', ')} | Subtotal Rp${subTotal.toLocaleString('id-ID')}`
+                        );
                     }
+
+                    storesDetailText = storeParts.join(' || ');
                 }
-            } catch (parseError) {
-                console.error('Error parsing order_items:', parseError.message);
-                storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+            } catch (e) {
+                console.error('Parse error:', e.message);
+                storesDetailText = order.order_note || '-';
             }
         } else {
-            storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+            storesDetailText = order.order_note || '-';
         }
 
-        // ✅ FIX: nomor driver dalam format 08xxx
+        // ✅ FINAL SAFETY: strip semua newline
+        storesDetailText = storesDetailText.replace(/\r?\n|\r/g, ' ').trim();
+        if (storesDetailText.length > 1500) storesDetailText = storesDetailText.substring(0, 1497) + '...';
+
         const driverPhoneDisplay = formatPhoneDisplay(confirmation.driver_phone);
 
-        await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, {
-            "1": order.customer_name,
-            "2": confirmation.driver_name,
-            "3": driverPhoneDisplay,   // ✅ 08xxx bukan 62xxx
-            "4": orderId,
-            "5": storesDetailText,
-            "6": formatRupiah(order.total_price)
-        });
+        const variables = {
+            "1": String(order.customer_name || '-'),
+            "2": String(confirmation.driver_name || 'Driver'),
+            "3": String(driverPhoneDisplay),
+            "4": String(orderId),
+            "5": String(storesDetailText),
+            "6": String(formatRupiah(order.total_price))
+        };
 
-        console.log(`✅ Customer notification sent to ${order.customer_phone}`);
+        console.log(`📤 [CUSTOMER] Variables["5"] =`, variables["5"]);
 
+        await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, variables);
+        console.log(`✅ Customer notified`);
     } catch (error) {
-        console.error(`❌ Error sending customer notification:`, error.message);
+        console.error(`❌ Error notifyCustomerOrderAccepted:`, error.message);
     }
 }
 // ============================================================
