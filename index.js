@@ -53,7 +53,7 @@ const CONFIG = {
 };
 
 // ============================================================
-// TWILIO INITIALIZATION WITH DETAILED LOGS
+// TWILIO INITIALIZATION
 // ============================================================
 let twilioClient = null;
 
@@ -103,7 +103,7 @@ const pool = mysql.createPool({
 });
 
 // ============================================================
-// LOGGER
+// GLOBAL VARIABLES & LOGGER
 // ============================================================
 const driverConfirmations = new Map();
 const LOG_DIR = path.join(__dirname, 'logs');
@@ -121,69 +121,42 @@ function logToFile(message, type = 'INFO') {
 
 function parsePrice(price) {
     if (price === null || price === undefined) return 0;
-
-    // If already number, return it
     if (typeof price === 'number') return price;
 
-    // Convert to string and clean
     let priceStr = String(price);
-
-    // Remove "Rp" and currency symbols
     priceStr = priceStr.replace(/[Rr][Pp]\s*/g, '');
     priceStr = priceStr.replace(/[$,]/g, '');
-
-    // Remove dots (thousand separators) and replace comma with dot
     priceStr = priceStr.replace(/\./g, '');
     priceStr = priceStr.replace(/,/g, '.');
 
-    // Parse to number
     const parsed = parseFloat(priceStr);
     return isNaN(parsed) ? 0 : parsed;
 }
 
 // ============================================================
-// TEST KONEKSI DATABASE
+// TEST DATABASE CONNECTION
 // ============================================================
 async function testDatabaseConnection() {
     console.log('\n🔍 Testing database connection...');
-
     try {
         const connection = await pool.getConnection();
-        const [rows] = await connection.query(
-            'SELECT VERSION() as version, NOW() as now, DATABASE() as db, USER() as user'
-        );
+        const [rows] = await connection.query('SELECT VERSION() as version, NOW() as now, DATABASE() as db, USER() as user');
         console.log('✅ DATABASE CONNECTED!');
         console.log(`   MySQL Version: ${rows[0].version}`);
         console.log(`   Server Time:   ${rows[0].now}`);
         console.log(`   Database:      ${rows[0].db}`);
         console.log(`   User:          ${rows[0].user}`);
-
-        const [tables] = await connection.query(`
-            SELECT TABLE_NAME FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = ?
-            AND TABLE_NAME IN ('inquiry_va','inquiry_qris','orders','drivers')
-        `, [rows[0].db]);
-
-        const existing = tables.map(t => t.TABLE_NAME);
-        console.log(`   Tables found: ${existing.join(', ') || 'none'}`);
-        for (const t of ['inquiry_va', 'inquiry_qris', 'orders', 'drivers']) {
-            if (!existing.includes(t)) console.warn(`⚠️  Table ${t} missing!`);
-        }
         connection.release();
         return true;
     } catch (err) {
         console.error('❌ DATABASE CONNECTION FAILED!');
         console.error(`   Error: ${err.message}`);
-        console.error(`   Code:  ${err.code}`);
         return false;
     }
 }
 
 let dbReady = false;
-testDatabaseConnection().then(result => {
-    dbReady = result;
-    if (!dbReady) console.error('\n⚠️ WARNING: Database not ready! API will not save data.');
-});
+testDatabaseConnection().then(result => { dbReady = result; });
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -217,55 +190,39 @@ function cleanValue(str) {
 }
 
 function generateSignatureVA(p) {
-    const raw = cleanValue(
-        p.amount + p.expired + p.bank_code + p.partner_reff +
-        p.customer_id + p.customer_name + p.customer_email + p.clientId
-    );
+    const raw = cleanValue(p.amount + p.expired + p.bank_code + p.partner_reff + p.customer_id + p.customer_name + p.customer_email + p.clientId);
     return hmac256(p.serverKey, '/transaction/create/vaPOST' + raw);
 }
 
 function generateSignatureQRIS(p) {
-    const raw = cleanValue(
-        p.amount + p.expired + p.partner_reff +
-        p.customer_id + p.customer_name + p.customer_email + p.clientId
-    );
+    const raw = cleanValue(p.amount + p.expired + p.partner_reff + p.customer_id + p.customer_name + p.customer_email + p.clientId);
     return hmac256(p.serverKey, '/transaction/create/qrisPOST' + raw);
 }
 
-// ============================================================
-// NORMALIZE PHONE NUMBER (BEFORE STORING AND COMPARING)
-// ============================================================
 function normalizePhoneNumber(phoneNumber) {
     if (!phoneNumber) return null;
-
-    // Hapus semua karakter non-digit
     let cleaned = phoneNumber.toString().replace(/\D/g, '');
-
-    // Jika dimulai dengan 0, ganti dengan 62
-    if (cleaned.startsWith('0')) {
-        cleaned = '62' + cleaned.substring(1);
-    }
-
-    // Jika tidak dimulai dengan 62, tambahkan 62
-    if (!cleaned.startsWith('62')) {
-        cleaned = '62' + cleaned;
-    }
-
+    if (cleaned.startsWith('0')) cleaned = '62' + cleaned.substring(1);
+    if (!cleaned.startsWith('62')) cleaned = '62' + cleaned;
     return cleaned;
 }
 
-// ============================================================
-// HELPER: Panggil Jagel API (app.jagel.id — Bearer token)
-// ============================================================
+function formatWhatsAppNumber(phoneNumber) {
+    if (!phoneNumber) return null;
+    let cleaned = phoneNumber.toString().replace(/\D/g, '');
+    if (cleaned.startsWith('0')) cleaned = '62' + cleaned.substring(1);
+    if (!cleaned.startsWith('62')) cleaned = '62' + cleaned;
+    return `whatsapp:${cleaned}`;
+}
+
+function formatRupiah(amount) {
+    return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(amount);
+}
+
 async function callJagelAppApi(url, bearerToken, method = 'GET', data = null) {
     const config = {
-        method,
-        url,
-        headers: {
-            'Authorization': `Bearer ${bearerToken}`,
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-        },
+        method, url,
+        headers: { 'Authorization': `Bearer ${bearerToken}`, 'Accept': 'application/json', 'Content-Type': 'application/json' },
         timeout: 30000,
         httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
     };
@@ -276,14 +233,10 @@ async function callJagelAppApi(url, bearerToken, method = 'GET', data = null) {
     return response;
 }
 
-// ============================================================
-// HELPER: Panggil Jagel API (api.jagel.id — API Key)
-// ============================================================
 async function callJagelApi(url, data = null, method = 'POST') {
     try {
         const config = {
-            method,
-            url,
+            method, url,
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             timeout: 30000,
             httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
@@ -296,971 +249,164 @@ async function callJagelApi(url, data = null, method = 'POST') {
     } catch (error) {
         if (error.response) {
             console.error(`❌ [JAGEL-API] HTTP ${error.response.status}:`, error.response.data);
-            return { data: { success: false, message: `API Error: ${error.response.status} - ${JSON.stringify(error.response.data)}` } };
+            return { data: { success: false, message: `API Error: ${error.response.status}` } };
         }
         console.error(`❌ [JAGEL-API] Error:`, error.message);
         return { data: { success: false, message: `Error: ${error.message}` } };
     }
 }
 
-// ============================================================
-// FUNGSI ADD BALANCE - SIMPLE VERSION (HARDCODE "amir")
-// ============================================================
 async function addBalance(amount, customer_name, methodCode, serialnumber) {
     const originalAmount = parseInt(amount);
-
-    // Hitung admin (4.000 untuk VA, 0.8% untuk QRIS)
-    let admin = 4000;
-    if (methodCode === 'QRIS') {
-        admin = Math.round(originalAmount * 0.008);
-    }
-
+    let admin = methodCode === 'QRIS' ? Math.round(originalAmount * 0.008) : 4000;
     const netAmount = originalAmount - admin;
-    const username = 'amir'; // ← HARDCODE
-
+    const username = 'amir';
     const note = `Pesanan dari ${customer_name} || Rp ${netAmount.toLocaleString('id-ID')} (admin ${admin.toLocaleString('id-ID')}) || ${methodCode === 'QRIS' ? 'QRIS' : 'VA'} || Reff: ${serialnumber}`;
-
     console.log(`💰 [ADD-BALANCE] ${customer_name} -> ${username} | Amount: ${netAmount} | Admin: ${admin}`);
-
     try {
         const response = await axios.post(`${CONFIG.jagelBaseUrl}/balance/adjust`, {
-            action: 'adjust_balance',
-            type: 'username',
-            value: username,
-            amount: netAmount,
-            note: note,
-            apikey: CONFIG.jagelApiKey
-        }, {
-            headers: { 'Content-Type': 'application/json' },
-            timeout: 30000
-        });
-
+            action: 'adjust_balance', type: 'username', value: username, amount: netAmount, note: note, apikey: CONFIG.jagelApiKey
+        }, { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
         console.log('✅ Balance added:', response.data);
         return { success: true, data: response.data };
-
     } catch (error) {
         console.error('❌ Add balance failed:', error.message);
         throw error;
     }
 }
 
-// ============================================================
-// TWILIO HELPER FUNCTIONS WITH CONTENT TEMPLATE & DETAILED LOGS
-// ============================================================
-
-// Format phone number to WhatsApp format
-function formatWhatsAppNumber(phoneNumber) {
-    if (!phoneNumber) {
-        console.error('❌ Empty phone number provided');
-        return null;
-    }
-
-    let cleaned = phoneNumber.toString().replace(/\D/g, '');
-
-    if (cleaned.length < 10) {
-        console.error(`❌ Invalid phone number: ${phoneNumber} (too short)`);
-        return null;
-    }
-
-    if (!cleaned.startsWith('62')) {
-        if (cleaned.startsWith('0')) {
-            cleaned = '62' + cleaned.substring(1);
-        } else {
-            cleaned = '62' + cleaned;
-        }
-    }
-
-    const formatted = `whatsapp:${cleaned}`;
-    console.log(`📱 Formatted: ${phoneNumber} -> ${formatted}`);
-    return formatted;
-}
-
-// Send WhatsApp message using Content Template (for business-initiated)
 async function sendWhatsAppTemplate(to, templateSid, variables) {
-    console.log(`\n📤 [SEND-TEMPLATE] Starting...`);
-    console.log(`   To: ${to}`);
-    console.log(`   Template SID: ${templateSid}`);
-    console.log(`   Variables:`, JSON.stringify(variables, null, 2));
-
-    // Validasi Twilio client
+    console.log(`\n📤 [SEND-TEMPLATE] To: ${to}, Template: ${templateSid}`);
     if (!twilioClient) {
-        console.error('❌ Twilio client not initialized! Attempting to re-initialize...');
         initTwilio();
-        if (!twilioClient) {
-            console.error('❌ Twilio client still not available! Check your .env file!');
-            return { success: false, error: 'Twilio client not initialized', mock: true };
-        }
+        if (!twilioClient) return { success: false, error: 'Twilio client not initialized' };
     }
-
-    // Validasi nomor tujuan
     const whatsappTo = formatWhatsAppNumber(to);
-    if (!whatsappTo) {
-        return { success: false, error: 'Invalid phone number' };
-    }
-
-    // Validasi template SID
-    if (!templateSid || !templateSid.startsWith('HX')) {
-        console.error(`❌ Invalid template SID: ${templateSid}`);
-        return { success: false, error: 'Invalid template SID' };
-    }
-
+    if (!whatsappTo) return { success: false, error: 'Invalid phone number' };
+    if (!templateSid || !templateSid.startsWith('HX')) return { success: false, error: 'Invalid template SID' };
     try {
-        console.log(`📱 [TEMPLATE] Sending to: ${whatsappTo}`);
-
         const result = await twilioClient.messages.create({
             from: CONFIG.twilioWaNumber,
             to: whatsappTo,
             contentSid: templateSid,
             contentVariables: JSON.stringify(variables)
         });
-
-        console.log(`✅ Template sent successfully!`);
-        console.log(`   Message SID: ${result.sid}`);
-        console.log(`   Status: ${result.status}`);
-
+        console.log(`✅ Template sent successfully! SID: ${result.sid}`);
         return { success: true, sid: result.sid, status: result.status };
-
     } catch (error) {
         console.error('❌ Twilio template error:', error.message);
-
-        // Detail error berdasarkan kode
-        if (error.code === 63016) {
-            console.error('   ⚠️ Template not approved or invalid Content SID!');
-            console.error('   Check template status in Twilio Console');
-        }
-        if (error.code === 21211) {
-            console.error('   ⚠️ Invalid phone number format!');
-            console.error(`   Make sure ${to} is a valid WhatsApp number`);
-        }
-        if (error.code === 21610) {
-            console.error('   ⚠️ The phone number is not opted in to WhatsApp!');
-            console.error(`   Customer must send "join" to ${CONFIG.twilioWaNumber} first`);
-        }
-        if (error.code === 63007) {
-            console.error('   ⚠️ Template language not supported or invalid');
-        }
-
         return { success: false, error: error.message, code: error.code };
     }
 }
 
-// Send free-form message (ONLY for replies within 24-hour window)
 async function sendWhatsAppFreeForm(to, message) {
-    console.log(`\n📤 [SEND-FREE-FORM] Starting...`);
-    console.log(`   To: ${to}`);
-    console.log(`   Message: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
-
-    if (!twilioClient) {
-        console.error('❌ Twilio client not initialized!');
-        return { success: false, error: 'Twilio client not initialized' };
-    }
-
+    console.log(`\n📤 [SEND-FREE-FORM] To: ${to}`);
+    if (!twilioClient) return { success: false, error: 'Twilio client not initialized' };
     const whatsappTo = formatWhatsAppNumber(to);
-    if (!whatsappTo) {
-        return { success: false, error: 'Invalid phone number' };
-    }
-
+    if (!whatsappTo) return { success: false, error: 'Invalid phone number' };
     try {
         const result = await twilioClient.messages.create({
             from: CONFIG.twilioWaNumber,
             to: whatsappTo,
             body: message
         });
-
         console.log(`✅ Free-form sent, SID: ${result.sid}`);
         return { success: true, sid: result.sid };
-
     } catch (error) {
         console.error('❌ Free-form error:', error.message);
         return { success: false, error: error.message };
     }
 }
 
-// Format Rupiah
-function formatRupiah(amount) {
-    return new Intl.NumberFormat('id-ID', {
-        style: 'currency',
-        currency: 'IDR',
-        minimumFractionDigits: 0
-    }).format(amount);
-}
-
 // ============================================================
-// ENDPOINT: GET /test-twilio (UNTUK TESTING TWILIO)
+// ENDPOINT: POST /orders (BUAT ORDER BARU - HANYA UNTUK PEMBUATAN AWAL)
 // ============================================================
-app.get('/test-twilio', async (req, res) => {
-    console.log('\n🧪 [TEST-TWILIO] Testing Twilio configuration...');
-
-    const testNumber = req.query.to || '';
-    const testTemplate = req.query.template || CONFIG.templateDriverConfirmation;
-
-    const result = {
-        success: true,
-        timestamp: new Date().toISOString(),
-        twilio_configured: !!(CONFIG.twilioSid && CONFIG.twilioAuth),
-        twilio_client_ready: !!twilioClient,
-        whatsapp_number: CONFIG.twilioWaNumber,
-        templates: {
-            driver_confirmation: CONFIG.templateDriverConfirmation,
-            driver_accepted: CONFIG.templateDriverOrderAccepted,
-            customer_confirmed: CONFIG.templateCustomerOrderConfirmed,
-            driver_rejected: CONFIG.templateDriverRejected,
-            no_driver: CONFIG.templateNoDriverAvailable
-        }
-    };
-
-    // Jika ada nomor tujuan, coba kirim test message
-    if (testNumber && req.query.send === 'true') {
-        console.log(`📤 [TEST] Attempting to send test message to ${testNumber}`);
-
-        const testVariables = {
-            "1": "Test Driver",
-            "2": "Test Customer",
-            "3": "Rp 10.000",
-            "4": "1"
-        };
-
-        const sendResult = await sendWhatsAppTemplate(testNumber, testTemplate, testVariables);
-        result.test_send = sendResult;
-    }
-
-    res.json(result);
-});
-
-// ============================================================
-// ENDPOINT: POST /adjust.php (Jagel action handler)
-// ============================================================
-app.post('/adjust.php', async (req, res) => {
-    console.log('\n📥 [ADJUST] Request received:', JSON.stringify(req.body, null, 2));
-
-    try {
-        const { action, value, amount, note, content } = req.body;
-
-        if (!action) {
-            console.warn('⚠️ [ADJUST] Missing action param');
-            return res.json({ success: false, message: 'Metode aksi tidak ditentukan' });
-        }
-
-        console.log(`🔍 [ADJUST] action="${action}" value="${value}"`);
-
-        let apiUrl = '';
-        let payload = null;
-        let method = 'GET';
-
-        switch (action) {
-            case 'check_balance':
-                apiUrl = `${JAGEL_BASE_URL}/balance/check?type=username&value=${encodeURIComponent(value)}&apikey=${API_KEY_JAGEL}`;
-                method = 'GET';
-                console.log(`💰 [ADJUST] check_balance for: ${value}`);
-                break;
-
-            case 'adjust_balance':
-                apiUrl = `${JAGEL_BASE_URL}/balance/adjust`;
-                const cleanAmt = Math.round(Math.abs(parseFloat(amount || 0))) * (amount < 0 ? -1 : 1);
-                payload = { type: 'username', value, amount: cleanAmt, note: note || 'Ship Booking', apikey: API_KEY_JAGEL };
-                method = 'POST';
-                console.log(`💸 [ADJUST] adjust_balance for: ${value}, amount: ${cleanAmt}`);
-                break;
-
-            case 'send_message':
-                apiUrl = `${JAGEL_BASE_URL}/message/send`;
-                payload = { type: 'username', value, content: content || '', apikey: API_KEY_JAGEL };
-                method = 'POST';
-                console.log(`📨 [ADJUST] send_message to: ${value}`);
-                break;
-
-            case 'confirm_payment':
-                apiUrl = `${JAGEL_BASE_URL}/confirmPayment`;
-                payload = { amount: Math.round(Math.abs(parseFloat(amount || 0))), apikey: API_KEY_JAGEL };
-                method = 'POST';
-                console.log(`✅ [ADJUST] confirm_payment, amount: ${amount}`);
-                break;
-
-            case 'get_user':
-                apiUrl = `${JAGEL_BASE_URL}/user`;
-                const utype = req.body.type || 'username';
-                payload = { type: utype, value, apikey: API_KEY_JAGEL };
-                method = 'POST';
-                console.log(`👤 [ADJUST] get_user: type=${utype}, value=${value}`);
-                break;
-
-            default:
-                console.warn(`⚠️ [ADJUST] Unknown action: "${action}"`);
-                return res.json({ success: false, message: 'Aksi tidak dikenal' });
-        }
-
-        console.log(`📤 [ADJUST] Calling Jagel API: ${method} ${apiUrl}`);
-        if (payload) console.log(`   Payload:`, JSON.stringify(payload));
-
-        const response = await callJagelApi(apiUrl, payload, method);
-        console.log(`✅ [ADJUST] Response:`, JSON.stringify(response.data));
-
-        return res.json(response.data);
-
-    } catch (error) {
-        console.error('❌ [ADJUST] Error:', error.message);
-        return res.json({ success: false, message: error.message || 'Internal Server Error' });
-    }
-});
-
-// ============================================================
-// ENDPOINT: POST /create-va
-// ============================================================
-app.post('/create-va', async (req, res) => {
-    console.log('\n📝 [CREATE-VA] Request received:', JSON.stringify(req.body, null, 2));
-
-    if (!dbReady) return res.status(503).json({ error: 'Database not ready' });
-
-    try {
-        const body = req.body;
-
-        let customerId = body.customer_id;
-        if (!customerId || customerId === '') {
-            customerId = generateCustomerId();
-            console.log(`🔑 [CREATE-VA] Generated customer_id: ${customerId}`);
-        }
-
-        const partner_reff = generatePartnerReff();
-        const expired = getExpiredTimestamp();
-
-        const bankCode = body.bank_code || '008';
-
-        const signature = generateSignatureVA({
-            amount: body.amount,
-            expired,
-            bank_code: bankCode,
-            partner_reff,
-            customer_id: customerId,
-            customer_name: body.customer_name,
-            customer_email: body.customer_email,
-            clientId: CONFIG.clientId,
-            serverKey: CONFIG.serverKey,
-        });
-
-        const payload = {
-            amount: body.amount,
-            bank_code: bankCode,
-            customer_id: customerId,
-            customer_name: body.customer_name,
-            customer_email: body.customer_email,
-            customer_phone: body.customer_phone || '',
-            partner_reff,
-            username: CONFIG.username,
-            pin: CONFIG.pin,
-            expired,
-            signature,
-            url_callback: CONFIG.callbackUrl,
-            remark: `VA ${bankCode}`
-        };
-
-        const response = await axios.post(
-            `${CONFIG.linkquGateway}/transaction/create/va`, payload,
-            { headers: { 'client-id': CONFIG.clientId, 'client-secret': CONFIG.clientSecret }, timeout: 30000 }
-        );
-
-        const result = response.data;
-        const vaNumber = result.virtual_account || null;
-        const isSuccess = result.status === 'SUCCESS' || result.response_code === '00';
-
-        await pool.execute(`
-            INSERT INTO inquiry_va
-            (partner_reff, customer_name, customer_phone, customer_email, 
-             bank_code, va_number, amount, expired, response_raw, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [
-            partner_reff,
-            body.customer_name,
-            body.customer_phone || null,
-            body.customer_email,
-            bankCode,
-            vaNumber,
-            body.amount,
-            expired,
-            JSON.stringify(result),
-            mysqlNow(),
-            isSuccess ? 'PENDING' : 'FAILED'
-        ]);
-
-        res.json({ ...result, partner_reff, customer_id: customerId, db_saved: true });
-
-    } catch (err) {
-        console.error('❌ [CREATE-VA] Error:', err.message);
-        if (err.response) console.error('   API Error:', JSON.stringify(err.response.data));
-        res.status(500).json({ error: 'Failed to create VA', detail: err.message });
-    }
-});
-
-// ============================================================
-// ENDPOINT: POST /create-qris
-// ============================================================
-app.post('/create-qris', async (req, res) => {
-    console.log('\n📝 [CREATE-QRIS] Request received:', JSON.stringify(req.body, null, 2));
-
-    if (!dbReady) return res.status(503).json({ error: 'Database not ready' });
-
-    try {
-        const body = req.body;
-
-        let customerId = body.customer_id;
-        if (!customerId || customerId === '') {
-            customerId = generateCustomerId();
-            console.log(`🔑 [CREATE-QRIS] Generated customer_id: ${customerId}`);
-        }
-
-        const partner_reff = generatePartnerReff();
-        const expired = getExpiredTimestamp();
-
-        const signature = generateSignatureQRIS({
-            amount: body.amount,
-            expired,
-            partner_reff,
-            customer_id: customerId,
-            customer_name: body.customer_name,
-            customer_email: body.customer_email,
-            clientId: CONFIG.clientId,
-            serverKey: CONFIG.serverKey,
-        });
-
-        const payload = {
-            amount: body.amount,
-            customer_id: customerId,
-            customer_name: body.customer_name,
-            customer_email: body.customer_email,
-            customer_phone: body.customer_phone || '',
-            partner_reff,
-            username: CONFIG.username,
-            pin: CONFIG.pin,
-            expired,
-            signature,
-            url_callback: CONFIG.callbackUrl,
-        };
-
-        const response = await axios.post(
-            `${CONFIG.linkquGateway}/transaction/create/qris`, payload,
-            { headers: { 'client-id': CONFIG.clientId, 'client-secret': CONFIG.clientSecret }, timeout: 30000 }
-        );
-
-        const result = response.data;
-        let qrisImageBuffer = null;
-
-        if (result?.imageqris) {
-            try {
-                const imgResp = await axios.get(result.imageqris.trim(), { responseType: 'arraybuffer', timeout: 10000 });
-                qrisImageBuffer = Buffer.from(imgResp.data);
-            } catch (imgErr) {
-                console.warn('⚠️ [CREATE-QRIS] Failed to download QR image:', imgErr.message);
-            }
-        }
-
-        const isSuccess = result.status === 'SUCCESS' || result.response_code === '00';
-
-        await pool.execute(`
-            INSERT INTO inquiry_qris
-            (partner_reff, customer_id, customer_name, amount, expired,
-             customer_phone, customer_email, qris_url, qris_image, response_raw, created_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [
-            partner_reff,
-            customerId,
-            body.customer_name,
-            body.amount,
-            expired,
-            body.customer_phone || null,
-            body.customer_email,
-            result?.imageqris || null,
-            qrisImageBuffer,
-            JSON.stringify(result),
-            mysqlNow(),
-            isSuccess ? 'PENDING' : 'FAILED'
-        ]);
-
-        res.json({ ...result, partner_reff, customer_id: customerId, db_saved: true });
-
-    } catch (err) {
-        console.error('❌ [CREATE-QRIS] Error:', err.message);
-        if (err.response) console.error('   API Error:', JSON.stringify(err.response.data));
-        res.status(500).json({ error: 'Failed to create QRIS', detail: err.message });
-    }
-});
-
-// ============================================================
-// ENDPOINT: POST /callback
-// ============================================================
-app.post('/callback', async (req, res) => {
-    console.log('\n📞 [CALLBACK] ============================================');
-    console.log('📞 [CALLBACK] Payload:', JSON.stringify(req.body, null, 2));
-
-    const { partner_reff, serialnumber } = req.body;
-
-    if (!partner_reff) {
-        logToFile('Missing partner_reff', 'ERROR');
-        return res.status(400).json({ error: 'partner_reff wajib ada' });
-    }
-
-    console.log(`🔍 [CALLBACK] Processing: ${partner_reff}`);
-    const connection = await pool.getConnection();
-
-    let tableName = null;
-    let dbData = null;
-
-    try {
-        await connection.beginTransaction();
-
-        let [rows] = await connection.execute(
-            `SELECT status, customer_name, amount, bank_code as method_code, 'VA' as type FROM inquiry_va WHERE partner_reff = ? FOR UPDATE`,
-            [partner_reff]
-        );
-        if (rows.length > 0) {
-            tableName = 'inquiry_va';
-            dbData = rows[0];
-            console.log(`✅ [CALLBACK] Found in inquiry_va: status=${dbData.status}`);
-        }
-
-        if (!tableName) {
-            [rows] = await connection.execute(
-                `SELECT status, customer_name, amount, 'QRIS' as method_code, 'QRIS' as type FROM inquiry_qris WHERE partner_reff = ? FOR UPDATE`,
-                [partner_reff]
-            );
-            if (rows.length > 0) {
-                tableName = 'inquiry_qris';
-                dbData = rows[0];
-                console.log(`✅ [CALLBACK] Found in inquiry_qris: status=${dbData.status}`);
-            }
-        }
-
-        if (!tableName || !dbData) {
-            await connection.rollback();
-            console.error(`❌ [CALLBACK] Transaction not found: ${partner_reff}`);
-            logToFile(`Transaction not found: ${partner_reff}`, 'ERROR');
-            return res.status(404).json({ error: 'Data transaksi tidak ditemukan' });
-        }
-
-        if (dbData.status === 'SUKSES') {
-            await connection.rollback();
-            console.log(`ℹ️ [CALLBACK] Already SUKSES, skip: ${partner_reff}`);
-            return res.json({ message: 'Sudah diproses sebelumnya.' });
-        }
-
-        await connection.execute(
-            `UPDATE ${tableName} SET status = 'SUKSES' WHERE partner_reff = ?`,
-            [partner_reff]
-        );
-        await connection.commit();
-        console.log(`✅ [CALLBACK] DB updated to SUKSES for ${partner_reff}`);
-
-        let methodCode = dbData.method_code;
-        if (dbData.type === 'RETAIL') methodCode = (methodCode || 'RETAIL').toUpperCase();
-
-        console.log(`💰 [CALLBACK] addBalance: user=${dbData.customer_name}, amount=${dbData.amount}, method=${methodCode}`);
-
-        await addBalance(dbData.amount, dbData.customer_name, methodCode, serialnumber || partner_reff);
-
-        console.log(`🎉 [CALLBACK] SUCCESS: Saldo ditambahkan untuk ${dbData.customer_name} via ${methodCode}`);
-        res.json({ message: 'Callback diterima dan saldo ditambahkan' });
-
-    } catch (err) {
-        console.error(`❌ [CALLBACK] Error in try block:`, err.message);
-
-        try {
-            if (tableName) {
-                await connection.execute(
-                    `UPDATE ${tableName} SET status = 'PENDING' WHERE partner_reff = ?`,
-                    [partner_reff]
-                );
-                await connection.commit();
-                console.warn(`⚠️ [CALLBACK] Rolled back to PENDING for ${partner_reff}`);
-            } else {
-                await connection.rollback();
-                console.warn(`⚠️ [CALLBACK] Rollback transaction (no table found)`);
-            }
-        } catch (rbErr) {
-            console.error(`❌ [CALLBACK] Rollback failed: ${rbErr.message}`);
-            try {
-                await connection.rollback();
-            } catch (finalErr) {
-                console.error(`❌ [CALLBACK] Final rollback failed: ${finalErr.message}`);
-            }
-        }
-
-        logToFile(`❌ Callback Error [${partner_reff}]: ${err.message}`, 'ERROR');
-        console.error(`❌ [CALLBACK] Error: ${err.message}`);
-        res.status(500).json({ error: 'Internal Server Error', detail: err.message });
-
-    } finally {
-        connection.release();
-        console.log(`🔓 [CALLBACK] Connection released for ${partner_reff}`);
-    }
-});
-
-// ============================================================
-// ENDPOINT: GET /download-qr/:partner_reff
-// ============================================================
-app.get('/download-qr/:partner_reff', async (req, res) => {
-    const { partner_reff } = req.params;
-
-    try {
-        const [rows] = await pool.execute(
-            'SELECT qris_image, qris_url FROM inquiry_qris WHERE partner_reff = ?',
-            [partner_reff]
-        );
-
-        if (!rows.length) {
-            return res.status(404).send('QRIS tidak ditemukan');
-        }
-
-        if (rows[0].qris_image) {
-            res.setHeader('Content-Disposition', `attachment; filename="qris-${partner_reff}.png"`);
-            res.setHeader('Content-Type', 'image/png');
-            return res.send(rows[0].qris_image);
-        }
-
-        if (!rows[0].qris_url) {
-            return res.status(404).send('URL QRIS tidak tersedia');
-        }
-
-        const imgResp = await axios.get(rows[0].qris_url.trim(), { responseType: 'arraybuffer', timeout: 10000 });
-        const buffer = Buffer.from(imgResp.data);
-
-        await pool.execute('UPDATE inquiry_qris SET qris_image = ? WHERE partner_reff = ?', [buffer, partner_reff]);
-
-        res.setHeader('Content-Disposition', `attachment; filename="qris-${partner_reff}.png"`);
-        res.setHeader('Content-Type', 'image/png');
-        res.send(buffer);
-
-    } catch (err) {
-        console.error('❌ [DOWNLOAD-QR] Error:', err.message);
-        res.status(500).send('Terjadi kesalahan server');
-    }
-});
-
-// ============================================================
-// ENDPOINT: GET /check-status/:partner_reff
-// ============================================================
-app.get('/check-status/:partner_reff', async (req, res) => {
-    const { partner_reff } = req.params;
-
-    if (!partner_reff) return res.status(400).json({ rc: '01', message: 'partner_reff diperlukan' });
-
-    try {
-        let transaction = null;
-
-        let [rows] = await pool.execute(
-            'SELECT partner_reff, status, amount, bank_code as method, created_at FROM inquiry_va WHERE partner_reff = ?',
-            [partner_reff]
-        );
-        if (rows.length > 0) { transaction = { ...rows[0], type: 'VA' }; }
-
-        if (!transaction) {
-            [rows] = await pool.execute(
-                'SELECT partner_reff, status, amount, created_at FROM inquiry_qris WHERE partner_reff = ?',
-                [partner_reff]
-            );
-            if (rows.length > 0) { transaction = { ...rows[0], type: 'QRIS', method: 'QRIS' }; }
-        }
-
-        if (!transaction) {
-            return res.status(404).json({ rc: '404', message: 'Transaksi tidak ditemukan', data: null });
-        }
-
-        const status_trx = transaction.status === 'SUKSES' ? 'success' : 'pending';
-
-        res.json({
-            rc: '00', message: 'Success',
-            data: {
-                partner_reff: transaction.partner_reff,
-                type: transaction.type,
-                method: transaction.method,
-                status_trx,
-                status_db: transaction.status,
-                amount: transaction.amount,
-                created_at: transaction.created_at,
-                checked_at: new Date().toISOString(),
-            },
-        });
-
-    } catch (err) {
-        console.error('❌ [CHECK-STATUS] Error:', err.message);
-        res.status(500).json({ rc: '99', message: 'Internal server error', error: err.message });
-    }
-});
-
-// ============================================================
-// ENDPOINT: POST /add-balance (manual trigger)
-// ============================================================
-app.post('/add-balance', async (req, res) => {
-    const { amount, username, method_code, serial_number } = req.body;
-
-    if (!amount || !username) {
-        return res.status(400).json({ success: false, message: 'amount dan username wajib diisi' });
-    }
-
-    try {
-        const result = await addBalance(
-            amount, username,
-            (method_code || 'VA').toUpperCase(),
-            serial_number || `MANUAL-${Date.now()}`
-        );
-        res.json({ success: true, ...result });
-    } catch (err) {
-        console.error('❌ [ADD-BALANCE-MANUAL] Error:', err.message);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-// ============================================================
-// ENDPOINT: POST /orders (buat order baru)
-// ============================================================
-const VALID_ORDER_STATUSES = [
-    'PENDING', 'SEARCHING', 'CONFIRMED', 'PICKED_UP',
-    'ON_THE_WAY', 'ARRIVED', 'COMPLETED', 'CANCELLED', 'FAILED'
-];
-
+const VALID_ORDER_STATUSES = ['PENDING', 'SEARCHING', 'CONFIRMED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED', 'COMPLETED', 'CANCELLED', 'FAILED'];
 const VALID_PAYMENT_STATUSES = ['UNPAID', 'PAID', 'REFUNDED', 'FAILED'];
 
-// ============================================================
-// ENDPOINT: POST /orders (buat order baru)
-// ============================================================
 app.post('/orders', async (req, res) => {
     console.log('\n🛒 [ORDERS-CREATE] Request received:', JSON.stringify(req.body, null, 2));
-
     try {
         const body = req.body;
-
-        // --- Validasi field wajib ---
         if (!body.customer_name || !body.customer_phone) {
-            return res.status(400).json({
-                success: false,
-                error: 'customer_name dan customer_phone wajib diisi'
-            });
+            return res.status(400).json({ success: false, error: 'customer_name dan customer_phone wajib diisi' });
         }
-
-        // --- Validasi enum order_status ---
-        if (body.order_status && !VALID_ORDER_STATUSES.includes(body.order_status.toUpperCase())) {
-            return res.status(400).json({
-                success: false,
-                error: 'order_status tidak valid',
-                valid: VALID_ORDER_STATUSES
-            });
-        }
-
-        // --- Validasi enum payment_status ---
-        if (body.payment_status && !VALID_PAYMENT_STATUSES.includes(body.payment_status.toUpperCase())) {
-            return res.status(400).json({
-                success: false,
-                error: 'payment_status tidak valid',
-                valid: VALID_PAYMENT_STATUSES
-            });
-        }
-
         const order_id = `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
         const now = mysqlNow();
-
-        // --- Gunakan object mapping agar kolom & nilai selalu sinkron ---
         const fields = {
-            order_id,
-            order_status: (body.order_status || 'PENDING').toUpperCase(),
-            order_date: body.order_date || now,
-            order_note: body.order_note || null,
-            service_type: body.service_type || null,
-            service_name: body.service_name || null,
-            service_description: body.service_description || null,
-            origin_address: body.origin_address || null,
-            origin_lat: body.origin_lat ?? null,
-            origin_lng: body.origin_lng ?? null,
-            destination_address: body.destination_address || null,
-            destination_lat: body.destination_lat ?? null,
-            destination_lng: body.destination_lng ?? null,
-            distance_km: body.distance_km ?? null,
-            estimated_duration_min: body.estimated_duration_min ?? null,
-            base_price: body.base_price ?? 0,
-            service_fee: body.service_fee ?? 0,
-            discount: body.discount ?? 0,
-            total_price: body.total_price ?? 0,
-            payment_method: body.payment_method || null,
-            payment_status: (body.payment_status || 'UNPAID').toUpperCase(),
-            partner_reff: body.partner_reff || null,
-            mitra_id: body.mitra_id || null,
-            mitra_name: body.mitra_name || null,
-            mitra_phone: body.mitra_phone || null,
-            driver_id: body.driver_id || null,
-            driver_name: body.driver_name || null,
-            driver_phone: body.driver_phone || null,
-            driver_photo: body.driver_photo || null,
-            driver_address: body.driver_address || null,
-            driver_lat: body.driver_lat ?? null,
-            driver_lng: body.driver_lng ?? null,
-            customer_name: body.customer_name,
-            customer_phone: body.customer_phone,
-            created_at: now,
-            updated_at: now,
+            order_id, order_status: (body.order_status || 'PENDING').toUpperCase(), order_date: body.order_date || now,
+            order_note: body.order_note || null, service_type: body.service_type || null, service_name: body.service_name || null,
+            service_description: body.service_description || null, origin_address: body.origin_address || null,
+            origin_lat: body.origin_lat ?? null, origin_lng: body.origin_lng ?? null,
+            destination_address: body.destination_address || null, destination_lat: body.destination_lat ?? null,
+            destination_lng: body.destination_lng ?? null, distance_km: body.distance_km ?? null,
+            estimated_duration_min: body.estimated_duration_min ?? null, base_price: body.base_price ?? 0,
+            service_fee: body.service_fee ?? 0, discount: body.discount ?? 0, total_price: body.total_price ?? 0,
+            payment_method: body.payment_method || null, payment_status: (body.payment_status || 'UNPAID').toUpperCase(),
+            partner_reff: body.partner_reff || null, mitra_id: body.mitra_id || null, mitra_name: body.mitra_name || null,
+            mitra_phone: body.mitra_phone || null, driver_id: body.driver_id || null, driver_name: body.driver_name || null,
+            driver_phone: body.driver_phone || null, driver_photo: body.driver_photo || null,
+            driver_address: body.driver_address || null, driver_lat: body.driver_lat ?? null, driver_lng: body.driver_lng ?? null,
+            customer_name: body.customer_name, customer_phone: body.customer_phone, created_at: now, updated_at: now,
         };
-
-        const columns = Object.keys(fields).join(', ');
-        const placeholders = Object.keys(fields).map(() => '?').join(', ');
-        const values = Object.values(fields);
-
-        const [dbResult] = await pool.execute(
-            `INSERT INTO orders (${columns}) VALUES (${placeholders})`,
-            values
-        );
-
+        const [dbResult] = await pool.execute(`INSERT INTO orders (${Object.keys(fields).join(', ')}) VALUES (${Object.keys(fields).map(() => '?').join(', ')})`, Object.values(fields));
         console.log(`✅ [ORDERS-CREATE] Order created: ${order_id}`);
-        res.status(201).json({
-            success: true,
-            message: 'Order berhasil dibuat',
-            order_id,
-            insert_id: dbResult.insertId
-        });
-
+        res.status(201).json({ success: true, message: 'Order berhasil dibuat', order_id, insert_id: dbResult.insertId });
     } catch (err) {
         console.error('❌ [ORDERS-CREATE] Error:', err.message);
         res.status(500).json({ error: 'Gagal membuat order', detail: err.message });
     }
 });
 
-// ============================================================
-// ENDPOINT: GET /orders (list orders dengan filter)
-// ============================================================
 app.get('/orders', async (req, res) => {
     const { driver_id, mitra_id, status, limit = 50, offset = 0 } = req.query;
-
     try {
-        // --- Validasi status jika dikirim ---
-        if (status && !VALID_ORDER_STATUSES.includes(status.toUpperCase())) {
-            return res.status(400).json({
-                success: false,
-                error: 'Status tidak valid',
-                valid: VALID_ORDER_STATUSES
-            });
-        }
-
-        // --- Validasi & sanitasi limit/offset ---
-        const limitVal = Math.min(Math.max(1, parseInt(limit) || 50), 200); // max 200
+        const limitVal = Math.min(Math.max(1, parseInt(limit) || 50), 200);
         const offsetVal = Math.max(0, parseInt(offset) || 0);
-
-        const where = [];
-        const params = [];
-
+        const where = [], params = [];
         if (driver_id) { where.push('driver_id = ?'); params.push(driver_id); }
         if (mitra_id) { where.push('mitra_id = ?'); params.push(mitra_id); }
         if (status) { where.push('order_status = ?'); params.push(status.toUpperCase()); }
-
         const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
-        const [results] = await pool.query(
-            `SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`,
-            params
-        );
-
+        const [results] = await pool.query(`SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ${limitVal} OFFSET ${offsetVal}`, params);
         res.json({ success: true, count: results.length, data: results });
-
     } catch (err) {
         console.error('❌ [ORDERS-LIST] Error:', err.message);
         res.status(500).json({ error: 'Gagal mengambil data orders', detail: err.message });
     }
 });
 
-// ============================================================
-// ENDPOINT: GET /orders/:order_id (detail order)
-// ============================================================
 app.get('/orders/:order_id', async (req, res) => {
     const { order_id } = req.params;
-
     try {
-        const [rows] = await pool.execute(
-            'SELECT * FROM orders WHERE order_id = ?',
-            [order_id]
-        );
-
-        if (!rows.length) {
-            return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
-        }
-
+        const [rows] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [order_id]);
+        if (!rows.length) return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
         res.json({ success: true, data: rows[0] });
-
     } catch (err) {
         console.error('❌ [ORDERS-DETAIL] Error:', err.message);
         res.status(500).json({ error: 'Gagal mengambil detail order', detail: err.message });
     }
 });
 
-// ============================================================
-// ENDPOINT: PUT /orders/:order_id (update order)
-// ============================================================
 app.put('/orders/:order_id', async (req, res) => {
     const { order_id } = req.params;
     const body = req.body;
-
     try {
-        // --- Validasi enum jika dikirim ---
-        if (body.order_status && !VALID_ORDER_STATUSES.includes(body.order_status.toUpperCase())) {
-            return res.status(400).json({
-                success: false,
-                error: 'order_status tidak valid',
-                valid: VALID_ORDER_STATUSES
-            });
-        }
-
-        if (body.payment_status && !VALID_PAYMENT_STATUSES.includes(body.payment_status.toUpperCase())) {
-            return res.status(400).json({
-                success: false,
-                error: 'payment_status tidak valid',
-                valid: VALID_PAYMENT_STATUSES
-            });
-        }
-
-        const allowedFields = [
-            'order_status', 'order_note',
-            'origin_address', 'origin_lat', 'origin_lng',
-            'destination_address', 'destination_lat', 'destination_lng',
-            'distance_km', 'estimated_duration_min',
-            'base_price', 'service_fee', 'discount', 'total_price',
-            'payment_method', 'payment_status', 'partner_reff',
-            'mitra_id', 'mitra_name', 'mitra_phone',
-            'driver_id', 'driver_name', 'driver_phone', 'driver_photo',
-            'driver_address', 'driver_lat', 'driver_lng',
-            'customer_name', 'customer_phone',
-        ];
-
-        const setClauses = [];
-        const values = [];
-
+        const allowedFields = ['order_status', 'order_note', 'origin_address', 'origin_lat', 'origin_lng', 'destination_address', 'destination_lat', 'destination_lng', 'distance_km', 'estimated_duration_min', 'base_price', 'service_fee', 'discount', 'total_price', 'payment_method', 'payment_status', 'partner_reff', 'mitra_id', 'mitra_name', 'mitra_phone', 'driver_id', 'driver_name', 'driver_phone', 'driver_photo', 'driver_address', 'driver_lat', 'driver_lng', 'customer_name', 'customer_phone'];
+        const setClauses = [], values = [];
         for (const field of allowedFields) {
             if (body[field] !== undefined) {
                 setClauses.push(`${field} = ?`);
-
-                // Normalisasi enum ke uppercase
-                if (field === 'order_status' || field === 'payment_status') {
-                    values.push(body[field].toUpperCase());
-                } else {
-                    values.push(body[field]);
-                }
+                values.push((field === 'order_status' || field === 'payment_status') ? body[field].toUpperCase() : body[field]);
             }
         }
-
-        if (!setClauses.length) {
-            return res.status(400).json({
-                success: false,
-                message: 'Tidak ada field valid untuk diupdate'
-            });
-        }
-
+        if (!setClauses.length) return res.status(400).json({ success: false, message: 'Tidak ada field valid untuk diupdate' });
         setClauses.push('updated_at = ?');
-        values.push(mysqlNow()); // updated_at
-        values.push(order_id);  // WHERE order_id = ?
-
-        const [result] = await pool.execute(
-            `UPDATE orders SET ${setClauses.join(', ')} WHERE order_id = ?`,
-            values
-        );
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
-        }
-
+        values.push(mysqlNow(), order_id);
+        const [result] = await pool.execute(`UPDATE orders SET ${setClauses.join(', ')} WHERE order_id = ?`, values);
+        if (result.affectedRows === 0) return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
         console.log(`✅ [ORDERS-UPDATE] Order updated: ${order_id}`);
         res.json({ success: true, message: 'Order berhasil diupdate', order_id });
-
     } catch (err) {
         console.error('❌ [ORDERS-UPDATE] Error:', err.message);
         res.status(500).json({ error: 'Gagal mengupdate order', detail: err.message });
@@ -1268,250 +414,53 @@ app.put('/orders/:order_id', async (req, res) => {
 });
 
 // ============================================================
-// ENDPOINT: GET /drivers (SSE for drivers)
-// ============================================================
-app.get('/drivers', async (req, res) => {
-    const HARDCODED_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjEzODE1NmI0Y2U1NGQxYmY2ZWRkNjllYmU5NjYxYzI3MmIxMjY4NDY5NDUzZjdhMjBjOWM0MWQ1ODNmODAzZjQwOGQ4MzdiN2Y2OGVjYTIzIn0.eyJhdWQiOiIxIiwianRpIjoiMTM4MTU2YjRjZTU0ZDFiZjZlZGQ2OWViZTk2NjFjMjcyYjEyNjg0Njk0NTNmN2EyMGM5YzQxZDU4M2Y4MDNmNDA4ZDgzN2I3ZjY4ZWNhMjMiLCJpYXQiOjE3ODA0OTE1NDEsIm5iZiI6MTc4MDQ5MTU0MSwiZXhwIjoxODEyMDI3NTQxLCJzdWIiOiIyOTcxODQ0Iiwic2NvcGVzIjpbXX0.V3nZisKH-lmfEmf0iqyRmadupFf8nVL5VbpxyBZ_Y7baoA2Q5yoposdHjmokbZqLEZ-a9dL0S2nINPNE9zxdjfU7tmY1Awz24Ii7mOkaQL8dz2680SY5S2raqiWiLn7vYNinTKiA2juWvKMFVvFkfH1PnKQQ_L7nGBW3ReQ0kQg4AbqAj5z1XcfDtuZ9NPLB0QupNsdIkSBz-bliNR3aX9YjL9pzv6aszKSzRYQZni2FT0URQKvPk9B0MXTpFDzKqjURlvkFrN-jpoiV6LSzBlIBuyR5rTf3seU9vPgGDLkDLX9sm7QO8vK7TKBl40TQjbmHT9KE7pQAM-JsPw5QyeJkSpXXNcRnpm1i0Pq8lrJUeAHlyE6j2iIsLoZKtUrQAI2rAdYUjwGFoo6N26c9rbZIEeibNUdSPco68oYY_BqKYoK4kGmzGCkUV1HrZopDhcrNfhDYZEiZtNgkNAiKRpjPXblMIeN7tGjORn29DXqxspGio2DhhNIEex-Ih3a5yaW39EgDVgWS2eDBTV0A6u3ZAJkxPctNkVkxehuxSCYVjnAv6dVjKcypzJQLmMXT77VAQ7hOrrd-_iO5cliCtkyoPjkVDYxEZ9bjAaFwkb7xVKdULFSwAyYzvKYas_-tG3mEvhcUynPRGVcJutfHULGYfYxJWkXdQovk7H-l7uo";
-
-    const { bearer_token, max_pages, page, unique_id, driver_status, detail = 'true' } = req.query;
-    const finalToken = bearer_token || HARDCODED_TOKEN;
-
-    res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*'
-    });
-
-    const sendEvent = (eventName, data) => {
-        res.write(`event: ${eventName}\n`);
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const DEFAULT_UNIQUE_ID = unique_id || '03421121304617f701ba3b374.23310242';
-    const DEFAULT_DRIVER_STATUS = driver_status || '2';
-    const REPORT_URL = 'https://app.jagel.id/api/driver/report';
-    const BATCH_SIZE = 3;
-
-    async function fetchDriverDetail(view_uid) {
-        const detailUrl = `https://app.jagel.id/api/users/${view_uid}?driver=1`;
-        try {
-            const response = await callJagelAppApi(detailUrl, finalToken, 'GET');
-            return response.data;
-        } catch (err) {
-            console.warn(`⚠️ [DETAIL] Failed for ${view_uid}: ${err.message}`);
-            return null;
-        }
-    }
-
-    async function fetchDriversReport(pageNum = 1) {
-        const payload = {
-            unique_id: DEFAULT_UNIQUE_ID,
-            paginate: 10,
-            driver_status: parseInt(DEFAULT_DRIVER_STATUS),
-            page: pageNum
-        };
-
-        try {
-            const response = await callJagelAppApi(REPORT_URL, finalToken, 'POST', payload);
-            return response.data;
-        } catch (err) {
-            console.error(`❌ [REPORT] Error on page ${pageNum}:`, err.message);
-            return null;
-        }
-    }
-
-    sendEvent('start', { message: 'Memulai pengambilan data driver' });
-
-    if (page) {
-        const reportData = await fetchDriversReport(parseInt(page));
-        if (!reportData || !reportData.success) {
-            sendEvent('error', { message: 'Gagal mengambil data report' });
-            sendEvent('end', { message: 'Proses gagal' });
-            return res.end();
-        }
-
-        const driversList = reportData.data?.drivers?.data || [];
-
-        if (driversList.length > 0 && detail === 'true') {
-            for (let i = 0; i < driversList.length; i++) {
-                const driver = driversList[i];
-                const detailData = await fetchDriverDetail(driver.view_uid);
-                sendEvent('driver_update', { driver: { ...driver, detail: detailData } });
-                await new Promise(r => setTimeout(r, 100));
-            }
-        } else if (driversList.length > 0) {
-            sendEvent('batch', { drivers: driversList });
-        }
-
-        sendEvent('end', { success: true, total_drivers: driversList.length });
-        return res.end();
-    }
-
-    const limit = Math.min(parseInt(max_pages) || 100, 200);
-    let currentPage = 1;
-    let lastPage = null;
-    let processedDrivers = 0;
-
-    while (currentPage <= limit) {
-        const reportData = await fetchDriversReport(currentPage);
-        if (!reportData || !reportData.success) break;
-
-        const driversData = reportData.data?.drivers;
-        if (!driversData) break;
-
-        const driversList = driversData.data || [];
-
-        if (lastPage === null) {
-            lastPage = driversData.last_page || 0;
-            sendEvent('meta', { total_pages: lastPage, total_drivers: driversData.total || 0 });
-        }
-
-        if (driversList.length === 0) break;
-
-        if (detail === 'true') {
-            for (let i = 0; i < driversList.length; i++) {
-                const driver = driversList[i];
-                const detailData = await fetchDriverDetail(driver.view_uid);
-                processedDrivers++;
-                sendEvent('driver_update', { count: processedDrivers, driver: { ...driver, detail: detailData } });
-                await new Promise(r => setTimeout(r, 100));
-            }
-        } else {
-            processedDrivers += driversList.length;
-            sendEvent('batch', { page: currentPage, drivers: driversList });
-        }
-
-        if (currentPage >= lastPage) break;
-        currentPage++;
-        await new Promise(r => setTimeout(r, 150));
-    }
-
-    sendEvent('complete', { total_drivers: processedDrivers, total_pages: lastPage });
-    sendEvent('end', { success: true });
-    res.end();
-});
-
-// ============================================================
-// ENDPOINT: POST /driver-confirmation (USING TEMPLATE)
-// ============================================================
-// ============================================================
-// ============================================================
-// ENDPOINT: POST /driver-confirmation (FIXED - ALWAYS INSERT/UPDATE)
+// ENDPOINT: POST /driver-confirmation (TIDAK MEMBUAT ORDER BARU, HANYA UPDATE)
 // ============================================================
 app.post('/driver-confirmation', async (req, res) => {
-    console.log('\n📋 [DRIVER-CONFIRMATION] Request body:', JSON.stringify(req.body, null, 2));
+    console.log('\n📋 [DRIVER-CONFIRMATION] Request:', JSON.stringify(req.body, null, 2));
+    const { order_id, driver_id, driver_name, driver_phone, customer_name, customer_phone, total_amount, total_price, jumlah_toko } = req.body;
 
-    const {
-        order_id,
-        driver_id,
-        driver_name,
-        driver_phone,
-        customer_name,
-        customer_phone,
-        total_amount,
-        total_price,
-        jumlah_toko
-    } = req.body;
-
-    // Validasi MINIMAL
     if (!order_id) {
-        console.error('❌ Missing order_id');
-        return res.status(400).json({
-            success: false,
-            message: 'order_id wajib diisi'
-        });
+        return res.status(400).json({ success: false, message: 'order_id wajib diisi' });
+    }
+    if (!customer_phone) {
+        return res.status(400).json({ success: false, message: 'customer_phone wajib diisi' });
     }
 
-    // Validasi customer phone - REQUIRED
-    let finalCustomerPhone = customer_phone || req.body.customer_phone || null;
-    if (!finalCustomerPhone) {
-        console.error('❌ Missing customer_phone');
-        return res.status(400).json({
-            success: false,
-            message: 'customer_phone wajib diisi'
-        });
-    }
+    const normalizedDriverPhone = driver_phone ? normalizePhoneNumber(driver_phone) : null;
+    const normalizedCustomerPhone = normalizePhoneNumber(customer_phone);
+    const finalCustomerName = customer_name || 'Customer';
+    const parsedTotal = parsePrice(total_price || total_amount || 0);
 
-    // Log untuk debugging
-    console.log(`📋 Processing order: ${order_id}`);
-    console.log(`   Driver: ${driver_name || 'N/A'} (${driver_phone || 'N/A'})`);
-    console.log(`   Customer: ${customer_name || 'N/A'} (${finalCustomerPhone})`);
-
-    // Parse total price - HANDLE RUPIAH FORMAT
-    const rawTotal = total_price || total_amount || 0;
-    const parsedTotal = parsePrice(rawTotal);
-    console.log(`   Total: ${rawTotal} -> ${parsedTotal}`);
+    console.log(`📋 Order: ${order_id}, Driver: ${driver_name}, Customer: ${finalCustomerName}`);
 
     try {
-        // Normalisasi nomor telepon
-        const normalizedDriverPhone = driver_phone ? normalizePhoneNumber(driver_phone) : null;
-        const normalizedCustomerPhone = normalizePhoneNumber(finalCustomerPhone);
+        // CEK APAKAH ORDER SUDAH ADA DI DATABASE
+        const [existingOrder] = await pool.execute('SELECT order_status, driver_id FROM orders WHERE order_id = ?', [order_id]);
 
-        // Pastikan customer_name ada (fallback)
-        const finalCustomerName = customer_name || req.body.customer_name || 'Customer';
-
-        // Cek apakah order sudah ada
-        const [existingOrder] = await pool.execute(
-            'SELECT id FROM orders WHERE order_id = ?',
-            [order_id]
-        );
-
-        let dbResult;
         if (existingOrder.length === 0) {
-            // INSERT new order
-            dbResult = await pool.execute(
-                `INSERT INTO orders (
-                    order_id, 
-                    order_status, 
-                    order_date,
-                    driver_id, 
-                    driver_name, 
-                    driver_phone,
-                    customer_name, 
-                    customer_phone,
-                    total_price, 
-                    payment_status,
-                    created_at, 
-                    updated_at
-                ) VALUES (?, 'PENDING', NOW(), ?, ?, ?, ?, ?, ?, 'UNPAID', NOW(), NOW())`,
-                [
-                    order_id,
-                    driver_id || null,
-                    driver_name || null,
-                    normalizedDriverPhone,
-                    finalCustomerName,
-                    normalizedCustomerPhone,
-                    parsedTotal  // ← GUNAKAN parsedTotal (number, bukan string dengan Rp)
-                ]
-            );
-            console.log(`✅ New order ${order_id} inserted to database`);
-        } else {
-            // UPDATE existing order
-            dbResult = await pool.execute(
-                `UPDATE orders 
-                 SET driver_id = ?,
-                     driver_name = ?,
-                     driver_phone = ?,
-                     customer_name = ?,
-                     customer_phone = ?,
-                     total_price = ?,
-                     updated_at = NOW()
-                 WHERE order_id = ?`,
-                [
-                    driver_id || null,
-                    driver_name || null,
-                    normalizedDriverPhone,
-                    finalCustomerName,
-                    normalizedCustomerPhone,
-                    parsedTotal,  // ← GUNAKAN parsedTotal
-                    order_id
-                ]
-            );
-            console.log(`✅ Order ${order_id} updated in database`);
+            // ORDER TIDAK DITEMUKAN - KEMBALIKAN ERROR
+            console.error(`❌ Order ${order_id} not found in database! Order must be created first via POST /orders`);
+            return res.status(404).json({
+                success: false,
+                message: 'Order tidak ditemukan. Silakan buat order terlebih dahulu.',
+                order_id: order_id
+            });
         }
 
-        // Simpan ke memory cache
+        // ORDER DITEMUKAN - UPDATE DATA DRIVER (TIDAK MERUBAH STATUS)
+        const currentStatus = existingOrder[0].order_status;
+        await pool.execute(
+            `UPDATE orders 
+             SET driver_id = ?, driver_name = ?, driver_phone = ?, 
+                 customer_name = ?, customer_phone = ?, total_price = ?,
+                 updated_at = NOW()
+             WHERE order_id = ?`,
+            [driver_id || null, driver_name || null, normalizedDriverPhone, finalCustomerName, normalizedCustomerPhone, parsedTotal, order_id]
+        );
+        console.log(`✅ Order ${order_id} updated with driver data (status tetap: ${currentStatus})`);
+
+        // Simpan ke memory cache untuk tracking konfirmasi
         driverConfirmations.set(order_id, {
             driver_id: driver_id || null,
             driver_name: driver_name || 'Driver',
@@ -1525,406 +474,98 @@ app.post('/driver-confirmation', async (req, res) => {
             expiresAt: Date.now() + (3 * 60 * 1000)
         });
 
-        // Kirim WhatsApp ke driver (gunakan raw total untuk display)
+        // Kirim WhatsApp ke driver
         let whatsappSent = false;
         if (driver_phone && normalizedDriverPhone) {
             try {
-                // Format untuk display (Rupiah)
-                const displayTotal = formatRupiah(parsedTotal);
-
-                const variables = {
+                const result = await sendWhatsAppTemplate(driver_phone, CONFIG.templateDriverConfirmation, {
                     "1": driver_name || 'Driver',
                     "2": finalCustomerName,
-                    "3": displayTotal,
+                    "3": formatRupiah(parsedTotal),
                     "4": String(jumlah_toko || 1)
-                };
-
-                const result = await sendWhatsAppTemplate(
-                    driver_phone,
-                    CONFIG.templateDriverConfirmation,
-                    variables
-                );
+                });
                 whatsappSent = result.success;
-                console.log(`📱 WhatsApp to driver: ${whatsappSent ? 'SENT' : 'FAILED'}`);
             } catch (waError) {
                 console.error(`📱 WhatsApp error:`, waError.message);
             }
         }
 
-        res.json({
-            success: true,
-            order_id: order_id,
-            driver_confirmed: true,
-            whatsapp_sent: whatsappSent,
-            message: 'Driver confirmation processed successfully'
-        });
-
+        res.json({ success: true, order_id, driver_confirmed: true, whatsapp_sent: whatsappSent, message: 'Driver data saved, menunggu konfirmasi driver' });
     } catch (err) {
         console.error('❌ Database error:', err.message);
-        console.error('   Query params:', {
-            order_id,
-            driver_id,
-            driver_name,
-            driver_phone,
-            customer_name,
-            customer_phone: finalCustomerPhone,
-            total: parsedTotal
-        });
-
-        res.status(500).json({
-            success: false,
-            message: 'Gagal memproses konfirmasi driver',
-            error: err.message
-        });
+        res.status(500).json({ success: false, message: 'Gagal memproses konfirmasi driver', error: err.message });
     }
 });
-// ============================================================
-// ENDPOINT: POST /orders/:order_id/assign-driver
-// ============================================================
-app.post('/orders/:order_id/assign-driver', async (req, res) => {
-    const { order_id } = req.params;
-    const { driver_id, driver_name, driver_phone } = req.body;
 
-    if (!driver_id || !driver_name || !driver_phone) {
-        return res.status(400).json({
-            success: false,
-            message: 'driver_id, driver_name, dan driver_phone wajib diisi'
-        });
+// ============================================================
+// ENDPOINT: POST /driver-confirm (ENDPOINT UNTUK KONFIRMASI DRIVER - UPDATE STATUS)
+// ============================================================
+app.post('/driver-confirm', async (req, res) => {
+    console.log('\n✅ [DRIVER-CONFIRM] Request:', JSON.stringify(req.body, null, 2));
+    const { order_id, action, driver_id, driver_name, driver_phone } = req.body;
+
+    if (!order_id) {
+        return res.status(400).json({ success: false, message: 'order_id wajib diisi' });
+    }
+    if (!action || !['accept', 'reject'].includes(action)) {
+        return res.status(400).json({ success: false, message: 'action harus "accept" atau "reject"' });
     }
 
     try {
-        const normalizedPhone = normalizePhoneNumber(driver_phone);
-
-        const [result] = await pool.execute(
-            `UPDATE orders 
-             SET driver_id = ?,
-                 driver_name = ?,
-                 driver_phone = ?,
-                 order_status = 'CONFIRMED',
-                 updated_at = NOW()
-             WHERE order_id = ?`,
-            [driver_id, driver_name, normalizedPhone, order_id]
-        );
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({
-                success: false,
-                message: 'Order tidak ditemukan'
-            });
+        const [existingOrder] = await pool.execute('SELECT order_status, customer_name, customer_phone, total_price FROM orders WHERE order_id = ?', [order_id]);
+        if (existingOrder.length === 0) {
+            return res.status(404).json({ success: false, message: 'Order tidak ditemukan' });
         }
 
-        console.log(`✅ Driver ${driver_name} assigned to order ${order_id}`);
+        const order = existingOrder[0];
+        const newStatus = action === 'accept' ? 'CONFIRMED' : 'CANCELLED';
 
-        res.json({
-            success: true,
-            message: 'Driver berhasil diassign ke order',
-            order_id,
-            driver: { driver_id, driver_name, driver_phone: normalizedPhone }
-        });
+        await pool.execute(`UPDATE orders SET order_status = ?, updated_at = NOW() WHERE order_id = ?`, [newStatus, order_id]);
+        console.log(`✅ Order ${order_id} status updated to ${newStatus}`);
 
+        if (action === 'accept') {
+            // Kirim notifikasi ke customer
+            await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, {
+                "1": order.customer_name,
+                "2": driver_name || 'Driver',
+                "3": driver_phone || '',
+                "4": order_id,
+                "5": "Pesanan Anda sedang diproses oleh driver",
+                "6": formatRupiah(order.total_price)
+            });
+
+            await sendWhatsAppFreeForm(driver_phone, '✅ Pesanan telah Anda terima. Terima kasih!');
+        } else {
+            await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateDriverRejected, { "1": order.customer_name });
+            await sendWhatsAppFreeForm(driver_phone, '❌ Pesanan ditolak. Terima kasih.');
+        }
+
+        res.json({ success: true, order_id, status: newStatus, message: `Order ${action}ed successfully` });
     } catch (err) {
-        console.error('❌ [ASSIGN-DRIVER] Error:', err.message);
-        res.status(500).json({
-            success: false,
-            error: 'Gagal assign driver',
-            detail: err.message
-        });
-    }
-});
-// ============================================================
-// ENDPOINT: POST /send-order-details (USING TEMPLATE)
-// ============================================================
-app.post('/send-order-details', async (req, res) => {
-    const { order_id, driver_phone, driver_name, customer_name, customer_phone, stores_detail, subtotal, total_ongkir, total, order_note } = req.body;
-
-    console.log(`\n📦 [SEND-ORDER-DETAILS] Order: ${order_id}`);
-
-    // Send to Driver using template
-    const driverVariables = {
-        "1": driver_name,
-        "2": customer_name,
-        "3": customer_phone,
-        "4": order_id,
-        "5": stores_detail || 'Detail pesanan terlampir',
-        "6": total
-    };
-
-    const driverResult = await sendWhatsAppTemplate(
-        driver_phone,
-        CONFIG.templateDriverOrderAccepted,
-        driverVariables
-    );
-
-    // Send to Customer using template
-    const customerVariables = {
-        "1": customer_name,
-        "2": driver_name,
-        "3": driver_phone,
-        "4": order_id,
-        "5": stores_detail || 'Detail pesanan terlampir',
-        "6": total
-    };
-
-    const customerResult = await sendWhatsAppTemplate(
-        customer_phone,
-        CONFIG.templateCustomerOrderConfirmed,
-        customerVariables
-    );
-
-    res.json({
-        success: driverResult.success && customerResult.success,
-        driver: driverResult,
-        customer: customerResult
-    });
-});
-
-// ============================================================
-// ENDPOINT: POST /send-driver-rejected (USING TEMPLATE)
-// ============================================================
-app.post('/send-driver-rejected', async (req, res) => {
-    const { customer_phone, customer_name } = req.body;
-
-    console.log(`\n📋 [SEND-DRIVER-REJECTED] To: ${customer_name} (${customer_phone})`);
-
-    const variables = {
-        "1": customer_name
-    };
-
-    const result = await sendWhatsAppTemplate(
-        customer_phone,
-        CONFIG.templateDriverRejected,
-        variables
-    );
-
-    res.json({ success: result.success, ...result });
-});
-
-// ============================================================
-// ENDPOINT: POST /send-no-driver (USING TEMPLATE)
-// ============================================================
-app.post('/send-no-driver', async (req, res) => {
-    const { customer_phone, customer_name, total_amount } = req.body;
-
-    console.log(`\n📋 [SEND-NO-DRIVER] To: ${customer_name} (${customer_phone})`);
-
-    const variables = {
-        "1": customer_name,
-        "2": total_amount,
-        "3": CONFIG.csNumber
-    };
-
-    const result = await sendWhatsAppTemplate(
-        customer_phone,
-        CONFIG.templateNoDriverAvailable,
-        variables
-    );
-
-    res.json({ success: result.success, ...result });
-});
-
-// ============================================================
-// ENDPOINT: GET /driver/accept/:orderId
-// ============================================================
-app.get('/driver/accept/:orderId', async (req, res) => {
-    const { orderId } = req.params;
-    const confirmation = driverConfirmations.get(orderId);
-
-    console.log(`\n📋 [DRIVER-ACCEPT] Order: ${orderId}, Status: ${confirmation?.status || 'not found'}`);
-
-    if (confirmation && confirmation.status === 'pending' && Date.now() < confirmation.expiresAt) {
-        confirmation.status = 'accepted';
-        confirmation.acceptedAt = Date.now();
-        driverConfirmations.set(orderId, confirmation);
-
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Pesanan Diterima</title>
-                <style>
-                    body {
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-                        margin: 0;
-                        padding: 20px;
-                    }
-                    .card {
-                        background: white;
-                        border-radius: 20px;
-                        padding: 40px;
-                        text-align: center;
-                        max-width: 400px;
-                        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                    }
-                    .icon { font-size: 80px; margin-bottom: 20px; }
-                    h2 { color: #10b981; margin-bottom: 10px; }
-                    p { color: #666; margin-bottom: 20px; }
-                    .order-id {
-                        background: #f3f4f6;
-                        padding: 10px;
-                        border-radius: 10px;
-                        font-family: monospace;
-                        margin: 20px 0;
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <div class="icon">✅</div>
-                    <h2>Pesanan Diterima!</h2>
-                    <p>Terima kasih telah menerima pesanan.</p>
-                    <div class="order-id">Order ID: ${orderId}</div>
-                    <p>Detail pesanan akan dikirimkan segera ke WhatsApp Anda.</p>
-                    <small>Halaman ini akan ditutup dalam 5 detik...</small>
-                </div>
-                <script>setTimeout(() => window.close(), 5000);</script>
-            </body>
-            </html>
-        `);
-    } else {
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>Konfirmasi Kadaluwarsa</title>
-                <style>
-                    body {
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        font-family: sans-serif;
-                        background: #fef2f2;
-                        margin: 0;
-                    }
-                    .card {
-                        background: white;
-                        border-radius: 20px;
-                        padding: 40px;
-                        text-align: center;
-                        max-width: 400px;
-                    }
-                    .icon { font-size: 80px; }
-                    h2 { color: #ef4444; }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <div class="icon">⏰</div>
-                    <h2>Konfirmasi Kadaluwarsa</h2>
-                    <p>Pesanan ini sudah tidak tersedia atau sudah kadaluwarsa.</p>
-                </div>
-            </body>
-            </html>
-        `);
+        console.error('❌ Error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
 // ============================================================
-// ENDPOINT: GET /driver/reject/:orderId
-// ============================================================
-app.get('/driver/reject/:orderId', async (req, res) => {
-    const { orderId } = req.params;
-    const confirmation = driverConfirmations.get(orderId);
-
-    console.log(`\n📋 [DRIVER-REJECT] Order: ${orderId}, Status: ${confirmation?.status || 'not found'}`);
-
-    if (confirmation && confirmation.status === 'pending' && Date.now() < confirmation.expiresAt) {
-        confirmation.status = 'rejected';
-        confirmation.rejectedAt = Date.now();
-        driverConfirmations.set(orderId, confirmation);
-
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>Pesanan Ditolak</title>
-                <style>
-                    body {
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        height: 100vh;
-                        font-family: sans-serif;
-                        background: #fef2f2;
-                        margin: 0;
-                    }
-                    .card {
-                        background: white;
-                        border-radius: 20px;
-                        padding: 40px;
-                        text-align: center;
-                        max-width: 400px;
-                    }
-                    .icon { font-size: 80px; }
-                    h2 { color: #ef4444; margin-bottom: 10px; }
-                    p { color: #666; }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <div class="icon">❌</div>
-                    <h2>Pesanan Ditolak</h2>
-                    <p>Terima kasih sudah memberitahu.</p>
-                    <p>Pesanan akan dialihkan ke driver lain.</p>
-                    <small>Halaman ini akan ditutup...</small>
-                </div>
-                <script>setTimeout(() => window.close(), 3000);</script>
-            </body>
-            </html>
-        `);
-    } else {
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <body style="display:flex;justify-content:center;align-items:center;height:100vh;">
-                <div style="text-align:center;">
-                    <div style="font-size:64px;">⏰</div>
-                    <h2>Konfirmasi Kadaluwarsa</h2>
-                    <p>Pesanan ini sudah tidak tersedia.</p>
-                </div>
-            </body>
-            </html>
-        `);
-    }
-});
-
-
-// ============================================================
-// WEBHOOK HANDLER - FIXED untuk handling NULL
+// WEBHOOK WHATSAPP - MENERIMA KONFIRMASI DARI DRIVER
 // ============================================================
 app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
-    console.log('\n📨 [WEBHOOK] ============================================');
-
+    console.log('\n📨 [WEBHOOK] Received');
     const messageBody = req.body.Body || req.body.body;
     const fromNumber = req.body.From || req.body.from;
-    const buttonPayload = req.body.ButtonPayload; // Untuk button response
+    const buttonPayload = req.body.ButtonPayload;
 
-    if (!messageBody && !buttonPayload) {
-        console.error('❌ Missing message');
-        return res.sendStatus(400);
-    }
+    if (!messageBody && !buttonPayload) return res.sendStatus(400);
 
     const rawDriverPhone = fromNumber.replace('whatsapp:', '');
     const driverPhone = normalizePhoneNumber(rawDriverPhone);
-
-    // Ambil message dari ButtonPayload atau Body
     let message = (buttonPayload || messageBody || '').trim().toUpperCase();
-    console.log(`📱 From: ${rawDriverPhone} -> ${driverPhone}`);
-    console.log(`📱 Message: ${message}`);
+    console.log(`📱 From: ${driverPhone}, Message: ${message}`);
 
-    // Cari order pending
+    // Cari order pending di memory cache
     let foundOrderId = null;
     let foundConfirmation = null;
-
     for (const [orderId, confirmation] of driverConfirmations) {
         if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
             foundOrderId = orderId;
@@ -1934,79 +575,44 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     }
 
     if (foundOrderId && foundConfirmation) {
-        console.log(`✅ Found pending order ${foundOrderId}`);
-
-        if (message === 'ACCEPT' || message === 'TERIMA' || message === 'SETUJU' || message === 'YES' || message === 'YA') {
-            foundConfirmation.status = 'accepted';
-            driverConfirmations.set(foundOrderId, foundConfirmation);
-            console.log(`✅ Driver ACCEPTED order ${foundOrderId}`);
-
-            // ========================================
-            // UPDATE DATABASE - Pastikan semua values terdefinisi
-            // ========================================
+        if (message === 'ACCEPT' || message === 'TERIMA' || message === 'YES') {
+            // UPDATE STATUS ORDER MENJADI CONFIRMED
             try {
-                // Siapkan values dengan null untuk undefined
-                const driverIdVal = foundConfirmation.driver_id !== undefined ? foundConfirmation.driver_id : null;
-                const driverNameVal = foundConfirmation.driver_name !== undefined ? foundConfirmation.driver_name : null;
-                const driverPhoneVal = foundConfirmation.driver_phone !== undefined ? foundConfirmation.driver_phone : null;
+                await pool.execute(`UPDATE orders SET order_status = 'CONFIRMED', updated_at = NOW() WHERE order_id = ?`, [foundOrderId]);
+                console.log(`✅ Order ${foundOrderId} status updated to CONFIRMED`);
 
-                const [updateResult] = await pool.execute(
-                    `UPDATE orders 
-                     SET order_status = 'CONFIRMED',
-                         driver_id = ?,
-                         driver_name = ?,
-                         driver_phone = ?,
-                         updated_at = NOW()
-                     WHERE order_id = ?`,
-                    [driverIdVal, driverNameVal, driverPhoneVal, foundOrderId]
-                );
+                // Update memory cache
+                foundConfirmation.status = 'accepted';
+                driverConfirmations.set(foundOrderId, foundConfirmation);
 
-                if (updateResult.affectedRows > 0) {
-                    console.log(`✅ Database updated: Order ${foundOrderId} -> CONFIRMED`);
-                } else {
-                    console.log(`⚠️ Order ${foundOrderId} not found in database, inserting...`);
-                    // Insert jika tidak ada
-                    await pool.execute(
-                        `INSERT INTO orders (
-                            order_id, order_status, driver_id, driver_name, driver_phone,
-                            customer_name, customer_phone, total_price, payment_status, created_at, updated_at
-                        ) VALUES (?, 'CONFIRMED', ?, ?, ?, ?, ?, ?, 'PAID', NOW(), NOW())`,
-                        [
-                            foundOrderId,
-                            driverIdVal,
-                            driverNameVal,
-                            driverPhoneVal,
-                            foundConfirmation.customer_name || null,
-                            foundConfirmation.customer_phone || null,
-                            foundConfirmation.total_amount || 0
-                        ]
-                    );
-                    console.log(`✅ Order ${foundOrderId} inserted to database`);
+                // Kirim notifikasi
+                await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Pesanan telah dikonfirmasi.');
+
+                const [order] = await pool.execute('SELECT customer_name, customer_phone, total_price FROM orders WHERE order_id = ?', [foundOrderId]);
+                if (order.length > 0) {
+                    await sendWhatsAppTemplate(order[0].customer_phone, CONFIG.templateCustomerOrderConfirmed, {
+                        "1": order[0].customer_name,
+                        "2": foundConfirmation.driver_name,
+                        "3": driverPhone,
+                        "4": foundOrderId,
+                        "5": "Pesanan Anda sedang diproses oleh driver",
+                        "6": formatRupiah(order[0].total_price)
+                    });
                 }
             } catch (dbError) {
                 console.error(`❌ Database error:`, dbError.message);
             }
-
-            // Kirim respon dan detail
-            await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Detail pesanan akan kami kirimkan segera.');
-            await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
-            await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
-
         } else if (message === 'REJECT' || message === 'TOLAK' || message === 'NO') {
-            foundConfirmation.status = 'rejected';
-            driverConfirmations.set(foundOrderId, foundConfirmation);
-            console.log(`❌ Driver REJECTED order ${foundOrderId}`);
-
             try {
-                await pool.execute(
-                    `UPDATE orders SET order_status = 'CANCELLED', updated_at = NOW() WHERE order_id = ?`,
-                    [foundOrderId]
-                );
+                await pool.execute(`UPDATE orders SET order_status = 'CANCELLED', updated_at = NOW() WHERE order_id = ?`, [foundOrderId]);
+                console.log(`❌ Order ${foundOrderId} cancelled`);
+
+                foundConfirmation.status = 'rejected';
+                driverConfirmations.set(foundOrderId, foundConfirmation);
+                await sendWhatsAppFreeForm(rawDriverPhone, '❌ Pesanan ditolak. Terima kasih.');
             } catch (dbError) {
                 console.error(`❌ Database error:`, dbError.message);
             }
-
-            await sendWhatsAppFreeForm(rawDriverPhone, '❌ Pesanan ditolak. Terima kasih.');
         }
     } else {
         console.log(`⚠️ No pending order found for driver ${driverPhone}`);
@@ -2014,157 +620,59 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 
     res.sendStatus(200);
 });
-// ============================================================
-// FUNGSI KIRIM DETAIL ORDER KE DRIVER
-// ============================================================
-// ============================================================
-// FUNGSI KIRIM DETAIL ORDER KE DRIVER
-// ============================================================
-async function sendOrderDetailsToDriver(orderId, confirmation) {
-    console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
-
-    try {
-        // Ambil detail order dari database
-        const [orders] = await pool.execute(
-            'SELECT * FROM orders WHERE order_id = ?',
-            [orderId]
-        );
-
-        if (orders.length === 0) {
-            console.log(`⚠️ Order ${orderId} not found in database yet, skipping detail send`);
-            console.log(`   Driver will receive details later when order is saved`);
-            return;
-        }
-
-        const order = orders[0];
-
-        const variables = {
-            "1": confirmation.driver_name,
-            "2": order.customer_name,
-            "3": order.customer_phone,
-            "4": orderId,
-            "5": "Detail pesanan: " + (order.order_note || '-'),
-            "6": formatRupiah(order.total_price)
-        };
-
-        await sendWhatsAppTemplate(
-            confirmation.driver_phone,
-            CONFIG.templateDriverOrderAccepted,
-            variables
-        );
-
-        console.log(`✅ Order details sent to driver`);
-
-    } catch (error) {
-        console.error(`❌ Error sending order details:`, error.message);
-    }
-}
 
 // ============================================================
-// FUNGSI NOTIFIKASI KE CUSTOMER
-// ============================================================
-async function notifyCustomerOrderAccepted(orderId, confirmation) {
-    console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
-
-    try {
-        const [orders] = await pool.execute(
-            'SELECT * FROM orders WHERE order_id = ?',
-            [orderId]
-        );
-
-        if (orders.length === 0) {
-            console.log(`⚠️ Order ${orderId} not found in database yet, skipping customer notification`);
-            return;
-        }
-
-        const order = orders[0];
-
-        const variables = {
-            "1": order.customer_name,
-            "2": confirmation.driver_name,
-            "3": confirmation.driver_phone,
-            "4": orderId,
-            "5": "Pesanan Anda sedang diproses oleh driver",
-            "6": formatRupiah(order.total_price)
-        };
-
-        await sendWhatsAppTemplate(
-            order.customer_phone,
-            CONFIG.templateCustomerOrderConfirmed,
-            variables
-        );
-
-        console.log(`✅ Customer notification sent to ${order.customer_phone}`);
-
-    } catch (error) {
-        console.error(`❌ Error sending customer notification:`, error.message);
-    }
-}
-// ============================================================
-// ENDPOINT: GET /check-confirmation/:orderId
+// ENDPOINT LAINNYA (YANG TIDAK BERUBAH)
 // ============================================================
 app.get('/check-confirmation/:orderId', async (req, res) => {
     const { orderId } = req.params;
     const confirmation = driverConfirmations.get(orderId);
-
-    console.log(`\n📋 [CHECK-CONFIRMATION] Order: ${orderId}, Status: ${confirmation?.status || 'not found'}`);
-
     if (confirmation) {
         if (confirmation.status === 'pending' && Date.now() > confirmation.expiresAt) {
             confirmation.status = 'timeout';
             driverConfirmations.set(orderId, confirmation);
-            console.log(`⏰ Order ${orderId} timed out`);
         }
-        res.json({
-            status: confirmation.status,
-            driver_id: confirmation.driver_id,
-            driver_name: confirmation.driver_name,
-            driver_phone: confirmation.driver_phone
-        });
+        res.json({ status: confirmation.status, driver_id: confirmation.driver_id, driver_name: confirmation.driver_name, driver_phone: confirmation.driver_phone });
     } else {
-        res.json({ status: 'not_found' });
+        // Cek dari database
+        const [rows] = await pool.execute('SELECT order_status, driver_id, driver_name, driver_phone FROM orders WHERE order_id = ?', [orderId]);
+        if (rows.length > 0 && rows[0].order_status === 'CONFIRMED') {
+            res.json({ status: 'accepted', driver_id: rows[0].driver_id, driver_name: rows[0].driver_name, driver_phone: rows[0].driver_phone });
+        } else {
+            res.json({ status: 'not_found' });
+        }
     }
 });
 
-// ============================================================
-// ENDPOINT: POST /send-whatsapp (general - FREE FORM ONLY FOR REPLIES)
-// ============================================================
-app.post('/send-whatsapp', async (req, res) => {
-    const { to, message, use_template, template_sid, variables } = req.body;
-
-    console.log(`\n📋 [SEND-WHATSAPP] To: ${to}, use_template: ${use_template}`);
-
-    let result;
-    if (use_template && template_sid) {
-        result = await sendWhatsAppTemplate(to, template_sid, variables || {});
+app.get('/driver/accept/:orderId', async (req, res) => {
+    const { orderId } = req.params;
+    const confirmation = driverConfirmations.get(orderId);
+    if (confirmation && confirmation.status === 'pending' && Date.now() < confirmation.expiresAt) {
+        await pool.execute(`UPDATE orders SET order_status = 'CONFIRMED', updated_at = NOW() WHERE order_id = ?`, [orderId]);
+        confirmation.status = 'accepted';
+        driverConfirmations.set(orderId, confirmation);
+        res.send(`<html><body style="text-align:center;padding:50px;"><h1>✅ Pesanan Diterima!</h1><p>Order ID: ${orderId}</p><script>setTimeout(()=>window.close(),3000);</script></body></html>`);
     } else {
-        result = await sendWhatsAppFreeForm(to, message);
+        res.send(`<html><body style="text-align:center;padding:50px;"><h1>⏰ Konfirmasi Kadaluwarsa</h1></body></html>`);
     }
-
-    res.json(result);
 });
 
-// ============================================================
-// ENDPOINT: GET /health
-// ============================================================
+app.get('/driver/reject/:orderId', async (req, res) => {
+    const { orderId } = req.params;
+    const confirmation = driverConfirmations.get(orderId);
+    if (confirmation && confirmation.status === 'pending' && Date.now() < confirmation.expiresAt) {
+        await pool.execute(`UPDATE orders SET order_status = 'CANCELLED', updated_at = NOW() WHERE order_id = ?`, [orderId]);
+        confirmation.status = 'rejected';
+        driverConfirmations.set(orderId, confirmation);
+        res.send(`<html><body style="text-align:center;padding:50px;"><h1>❌ Pesanan Ditolak</h1></body></html>`);
+    } else {
+        res.send(`<html><body style="text-align:center;padding:50px;"><h1>⏰ Konfirmasi Kadaluwarsa</h1></body></html>`);
+    }
+});
+
+// Health check
 app.get('/health', (req, res) => {
-    console.log(`\n💚 [HEALTH] Health check at ${new Date().toISOString()}`);
-
-    res.json({
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        database_ready: dbReady,
-        uptime: process.uptime(),
-        twilio_configured: !!(CONFIG.twilioSid && CONFIG.twilioAuth),
-        twilio_client_ready: !!twilioClient,
-        templates: {
-            driver_confirmation: CONFIG.templateDriverConfirmation,
-            driver_order_accepted: CONFIG.templateDriverOrderAccepted,
-            customer_order_confirmed: CONFIG.templateCustomerOrderConfirmed,
-            driver_rejected: CONFIG.templateDriverRejected,
-            no_driver_available: CONFIG.templateNoDriverAvailable
-        }
-    });
+    res.json({ status: 'OK', timestamp: new Date().toISOString(), database_ready: dbReady, twilio_ready: !!twilioClient });
 });
 
 // ============================================================
@@ -2175,39 +683,5 @@ app.listen(PORT, () => {
     console.log('\n========================================');
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📍 URL: http://localhost:${PORT}`);
-    console.log(`📁 Log: ${LOG_DIR}`);
-    console.log('');
-    console.log('📌 Endpoints:');
-    console.log(`   GET  /health`);
-    console.log(`   GET  /test-twilio`);
-    console.log(`   GET  /test-twilio?send=true&to=628123456789`);
-    console.log(`   POST /adjust.php`);
-    console.log(`   POST /create-va`);
-    console.log(`   POST /create-qris`);
-    console.log(`   POST /callback`);
-    console.log(`   POST /add-balance`);
-    console.log(`   GET  /download-qr/:partner_reff`);
-    console.log(`   GET  /check-status/:partner_reff`);
-    console.log(`   POST /orders`);
-    console.log(`   GET  /orders`);
-    console.log(`   GET  /orders/:order_id`);
-    console.log(`   PUT  /orders/:order_id`);
-    console.log(`   GET  /drivers?bearer_token=xxx`);
-    console.log(`   POST /driver-confirmation`);
-    console.log(`   POST /send-order-details`);
-    console.log(`   POST /send-driver-rejected`);
-    console.log(`   POST /send-no-driver`);
-    console.log(`   GET  /driver/accept/:orderId`);
-    console.log(`   GET  /driver/reject/:orderId`);
-    console.log(`   POST /webhook/whatsapp`);
-    console.log(`   GET  /check-confirmation/:orderId`);
-    console.log(`   POST /send-whatsapp`);
-    console.log('');
-    console.log('📱 Twilio Templates:');
-    console.log(`   Driver Confirmation (QR): ${CONFIG.templateDriverConfirmation}`);
-    console.log(`   Driver Order Accepted: ${CONFIG.templateDriverOrderAccepted}`);
-    console.log(`   Customer Order Confirmed: ${CONFIG.templateCustomerOrderConfirmed}`);
-    console.log(`   Driver Rejected: ${CONFIG.templateDriverRejected}`);
-    console.log(`   No Driver Available: ${CONFIG.templateNoDriverAvailable}`);
     console.log('========================================\n');
 });
