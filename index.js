@@ -200,10 +200,30 @@ async function addBalanceToAmir(amount, customerName, methodCode, serialNumber) 
 // TWILIO SEND FUNCTIONS
 // ============================================================
 async function sendWhatsAppTemplate(to, templateSid, variables) {
-    if (!twilioClient) return { success: false, error: 'Twilio not initialized' };
-    const whatsappTo = formatWhatsAppNumber(to);
-    if (!whatsappTo) return { success: false, error: 'Invalid phone number' };
-    if (!templateSid || !templateSid.startsWith('HX')) return { success: false, error: 'Invalid template SID' };
+    console.log(`\n📤 [SEND-TEMPLATE] Starting...`);
+    console.log(`   Original to: ${to}`);
+    console.log(`   Template SID: ${templateSid}`);
+
+    if (!twilioClient) {
+        console.error('❌ Twilio client not initialized!');
+        return { success: false, error: 'Twilio not initialized' };
+    }
+
+    // ✅ NORMALISASI ULANG NOMOR (pastikan format whatsapp:62xxx)
+    let normalizedNumber = normalizePhoneNumber(to);
+    if (!normalizedNumber) {
+        console.error(`❌ Invalid phone number: ${to}`);
+        return { success: false, error: 'Invalid phone number' };
+    }
+
+    const whatsappTo = `whatsapp:${normalizedNumber}`;
+    console.log(`📱 Formatted: ${to} -> ${whatsappTo}`);
+
+    if (!templateSid || !templateSid.startsWith('HX')) {
+        console.error(`❌ Invalid template SID: ${templateSid}`);
+        return { success: false, error: 'Invalid template SID' };
+    }
+
     try {
         const result = await twilioClient.messages.create({
             from: CONFIG.twilioWaNumber,
@@ -211,23 +231,42 @@ async function sendWhatsAppTemplate(to, templateSid, variables) {
             contentSid: templateSid,
             contentVariables: JSON.stringify(variables)
         });
+        console.log(`✅ Template sent successfully! SID: ${result.sid}`);
         return { success: true, sid: result.sid };
     } catch (error) {
-        console.error('❌ Twilio error:', error.message);
+        console.error('❌ Twilio template error:', error.message);
+        console.error(`   To: ${whatsappTo}`);
+        console.error(`   Template: ${templateSid}`);
         return { success: false, error: error.message };
     }
 }
 
 async function sendWhatsAppFreeForm(to, message) {
-    if (!twilioClient) return { success: false, error: 'Twilio not initialized' };
-    const whatsappTo = formatWhatsAppNumber(to);
-    if (!whatsappTo) return { success: false, error: 'Invalid phone number' };
+    console.log(`\n📤 [SEND-FREE-FORM] Starting...`);
+    console.log(`   Original to: ${to}`);
+
+    if (!twilioClient) {
+        console.error('❌ Twilio client not initialized!');
+        return { success: false, error: 'Twilio not initialized' };
+    }
+
+    // ✅ NORMALISASI ULANG NOMOR
+    let normalizedNumber = normalizePhoneNumber(to);
+    if (!normalizedNumber) {
+        console.error(`❌ Invalid phone number: ${to}`);
+        return { success: false, error: 'Invalid phone number' };
+    }
+
+    const whatsappTo = `whatsapp:${normalizedNumber}`;
+    console.log(`📱 Formatted: ${to} -> ${whatsappTo}`);
+
     try {
         const result = await twilioClient.messages.create({
             from: CONFIG.twilioWaNumber,
             to: whatsappTo,
             body: message
         });
+        console.log(`✅ Free-form sent, SID: ${result.sid}`);
         return { success: true, sid: result.sid };
     } catch (error) {
         console.error('❌ Free-form error:', error.message);
@@ -782,6 +821,9 @@ app.put('/orders/:order_id', async (req, res) => {
 // ============================================================
 // ENDPOINT: POST /driver-confirmation
 // ============================================================
+// ============================================================
+// ENDPOINT: POST /driver-confirmation
+// ============================================================
 app.post('/driver-confirmation', async (req, res) => {
     console.log('\n📋 [DRIVER-CONFIRMATION] Request:', JSON.stringify(req.body, null, 2));
 
@@ -791,15 +833,18 @@ app.post('/driver-confirmation', async (req, res) => {
         return res.status(400).json({ success: false, message: 'order_id wajib diisi' });
     }
 
-    const normalizedDriverPhone = driver_phone ? normalizePhoneNumber(driver_phone) : null;
-    const normalizedCustomerPhone = customer_phone ? normalizePhoneNumber(customer_phone) : null;
+    // ✅ NORMALISASI NOMOR - PASTIKAN FORMAT 62XXX
+    const normalizedDriverPhone = normalizePhoneNumber(driver_phone);
+    const normalizedCustomerPhone = normalizePhoneNumber(customer_phone);
     const parsedTotal = parsePrice(total_amount || 0);
+
+    console.log(`📱 Driver phone original: ${driver_phone} -> normalized: ${normalizedDriverPhone}`);
+    console.log(`📱 Customer phone original: ${customer_phone} -> normalized: ${normalizedCustomerPhone}`);
 
     try {
         const [existingOrder] = await pool.execute('SELECT id FROM orders WHERE order_id = ?', [order_id]);
 
         if (existingOrder.length === 0) {
-            // JANGAN BUAT ORDER BARU! Order harus sudah dibuat via POST /orders
             console.error(`❌ Order ${order_id} tidak ditemukan! Order harus dibuat terlebih dahulu via POST /orders`);
             return res.status(404).json({
                 success: false,
@@ -808,11 +853,13 @@ app.post('/driver-confirmation', async (req, res) => {
             });
         }
 
+        // ✅ UPDATE driver info dengan nomor yang sudah dinormalisasi
         await pool.execute(`
             UPDATE orders SET driver_id = ?, driver_name = ?, driver_phone = ?, updated_at = NOW() WHERE order_id = ?
         `, [driver_id || null, driver_name || null, normalizedDriverPhone, order_id]);
         console.log(`✅ Driver assigned to ${order_id}`);
 
+        // ✅ Simpan ke memory cache dengan nomor yang sudah dinormalisasi
         driverConfirmations.set(order_id, {
             driver_id, driver_name, driver_phone: normalizedDriverPhone,
             customer_name, customer_phone: normalizedCustomerPhone,
@@ -820,15 +867,22 @@ app.post('/driver-confirmation', async (req, res) => {
             status: 'pending', timestamp: Date.now(), expiresAt: Date.now() + (3 * 60 * 1000)
         });
 
+        // ✅ KIRIM WHATSAPP KE DRIVER - GUNAKAN NOMOR YANG SUDAH DINORMALISASI
         let whatsappSent = false;
-        if (driver_phone) {
-            const result = await sendWhatsAppTemplate(driver_phone, CONFIG.templateDriverConfirmation, {
+        if (normalizedDriverPhone) {
+            const variables = {
                 "1": driver_name || 'Driver',
                 "2": customer_name || 'Customer',
                 "3": formatRupiah(parsedTotal),
                 "4": String(jumlah_toko || 1)
-            });
+            };
+
+            console.log(`📤 Sending WhatsApp to driver: ${normalizedDriverPhone}`);
+            const result = await sendWhatsAppTemplate(normalizedDriverPhone, CONFIG.templateDriverConfirmation, variables);
             whatsappSent = result.success;
+            console.log(`📱 WhatsApp result: ${whatsappSent ? 'SENT' : 'FAILED'} - ${result.error || ''}`);
+        } else {
+            console.error(`❌ Cannot send WhatsApp: driver phone is invalid`);
         }
 
         res.json({ success: true, order_id, whatsapp_sent: whatsappSent });
@@ -884,6 +938,7 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         }
     }
 
+    // Di webhook whatsapp, uncomment baris ini:
     if (foundOrderId && foundConfirmation && (message === 'ACCEPT' || message === 'TERIMA' || message === 'YES')) {
         foundConfirmation.status = 'accepted';
         driverConfirmations.set(foundOrderId, foundConfirmation);
@@ -893,9 +948,9 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 
         await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Pesanan telah dikonfirmasi.');
 
-        // Panggil fungsi yang sudah dibuat
-        // await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
-        // await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
+        // ✅ UNCOMMENT UNTUK MENGIRIM DETAIL
+        await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
+        await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
     } else if (foundOrderId && foundConfirmation && (message === 'REJECT' || message === 'TOLAK' || message === 'NO')) {
         foundConfirmation.status = 'rejected';
         driverConfirmations.set(foundOrderId, foundConfirmation);
