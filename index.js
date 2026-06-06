@@ -799,11 +799,13 @@ app.post('/driver-confirmation', async (req, res) => {
         const [existingOrder] = await pool.execute('SELECT id FROM orders WHERE order_id = ?', [order_id]);
 
         if (existingOrder.length === 0) {
-            await pool.execute(`
-                INSERT INTO orders (order_id, order_status, customer_name, customer_phone, total_price, payment_status, created_at, updated_at)
-                VALUES (?, 'PENDING', ?, ?, ?, 'UNPAID', NOW(), NOW())
-            `, [order_id, customer_name || 'Customer', normalizedCustomerPhone, parsedTotal]);
-            console.log(`✅ Order ${order_id} created`);
+            // JANGAN BUAT ORDER BARU! Order harus sudah dibuat via POST /orders
+            console.error(`❌ Order ${order_id} tidak ditemukan! Order harus dibuat terlebih dahulu via POST /orders`);
+            return res.status(404).json({
+                success: false,
+                message: 'Order tidak ditemukan. Silakan buat order terlebih dahulu.',
+                order_id: order_id
+            });
         }
 
         await pool.execute(`
@@ -891,17 +893,9 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 
         await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Pesanan telah dikonfirmasi.');
 
-        const [order] = await pool.execute('SELECT customer_name, customer_phone, total_price FROM orders WHERE order_id = ?', [foundOrderId]);
-        if (order.length) {
-            await sendWhatsAppTemplate(order[0].customer_phone, CONFIG.templateCustomerOrderConfirmed, {
-                "1": order[0].customer_name,
-                "2": foundConfirmation.driver_name,
-                "3": driverPhone,
-                "4": foundOrderId,
-                "5": "Pesanan Anda sedang diproses oleh driver",
-                "6": formatRupiah(order[0].total_price)
-            });
-        }
+        // Panggil fungsi yang sudah dibuat
+        await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
+        await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
     } else if (foundOrderId && foundConfirmation && (message === 'REJECT' || message === 'TOLAK' || message === 'NO')) {
         foundConfirmation.status = 'rejected';
         driverConfirmations.set(foundOrderId, foundConfirmation);
@@ -911,6 +905,78 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 
     res.sendStatus(200);
 });
+
+// ============================================================
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER (TANPA AUTO-CREATE)
+// ============================================================
+async function sendOrderDetailsToDriver(orderId, confirmation) {
+    console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
+
+    try {
+        const [orders] = await pool.execute(
+            'SELECT * FROM orders WHERE order_id = ?',
+            [orderId]
+        );
+
+        // ❌ JANGAN BUAT ORDER BARU!
+        if (orders.length === 0) {
+            console.error(`❌ Order ${orderId} not found in database! Order harus dibuat terlebih dahulu via POST /orders`);
+            console.log(`   Driver: ${confirmation.driver_name}, Customer: ${confirmation.customer_name}`);
+            return;
+        }
+
+        const order = orders[0];
+
+        await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
+            "1": confirmation.driver_name,
+            "2": order.customer_name,
+            "3": order.customer_phone,
+            "4": orderId,
+            "5": "Detail pesanan: " + (order.order_note || '-'),
+            "6": formatRupiah(order.total_price)
+        });
+
+        console.log(`✅ Order details sent to driver`);
+
+    } catch (error) {
+        console.error(`❌ Error sending order details:`, error.message);
+    }
+}
+
+// ============================================================
+// FUNGSI NOTIFIKASI KE CUSTOMER (TANPA AUTO-CREATE)
+// ============================================================
+async function notifyCustomerOrderAccepted(orderId, confirmation) {
+    console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
+
+    try {
+        const [orders] = await pool.execute(
+            'SELECT * FROM orders WHERE order_id = ?',
+            [orderId]
+        );
+
+        if (orders.length === 0) {
+            console.error(`❌ Order ${orderId} not found in database! Cannot notify customer.`);
+            return;
+        }
+
+        const order = orders[0];
+
+        await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, {
+            "1": order.customer_name,
+            "2": confirmation.driver_name,
+            "3": confirmation.driver_phone,
+            "4": orderId,
+            "5": "Pesanan Anda sedang diproses oleh driver",
+            "6": formatRupiah(order.total_price)
+        });
+
+        console.log(`✅ Customer notification sent to ${order.customer_phone}`);
+
+    } catch (error) {
+        console.error(`❌ Error sending customer notification:`, error.message);
+    }
+}
 
 // ============================================================
 // ENDPOINT: GET /check-confirmation/:orderId
