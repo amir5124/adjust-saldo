@@ -520,6 +520,148 @@ app.post('/callback', async (req, res) => {
 });
 
 // ============================================================
+// ENDPOINT: GET /drivers (SSE for drivers)
+// ============================================================
+app.get('/drivers', async (req, res) => {
+    const HARDCODED_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjEzODE1NmI0Y2U1NGQxYmY2ZWRkNjllYmU5NjYxYzI3MmIxMjY4NDY5NDUzZjdhMjBjOWM0MWQ1ODNmODAzZjQwOGQ4MzdiN2Y2OGVjYTIzIn0.eyJhdWQiOiIxIiwianRpIjoiMTM4MTU2YjRjZTU0ZDFiZjZlZGQ2OWViZTk2NjFjMjcyYjEyNjg0Njk0NTNmN2EyMGM5YzQxZDU4M2Y4MDNmNDA4ZDgzN2I3ZjY4ZWNhMjMiLCJpYXQiOjE3ODA0OTE1NDEsIm5iZiI6MTc4MDQ5MTU0MSwiZXhwIjoxODEyMDI3NTQxLCJzdWIiOiIyOTcxODQ0Iiwic2NvcGVzIjpbXX0.V3nZisKH-lmfEmf0iqyRmadupFf8nVL5VbpxyBZ_Y7baoA2Q5yoposdHjmokbZqLEZ-a9dL0S2nINPNE9zxdjfU7tmY1Awz24Ii7mOkaQL8dz2680SY5S2raqiWiLn7vYNinTKiA2juWvKMFVvFkfH1PnKQQ_L7nGBW3ReQ0kQg4AbqAj5z1XcfDtuZ9NPLB0QupNsdIkSBz-bliNR3aX9YjL9pzv6aszKSzRYQZni2FT0URQKvPk9B0MXTpFDzKqjURlvkFrN-jpoiV6LSzBlIBuyR5rTf3seU9vPgGDLkDLX9sm7QO8vK7TKBl40TQjbmHT9KE7pQAM-JsPw5QyeJkSpXXNcRnpm1i0Pq8lrJUeAHlyE6j2iIsLoZKtUrQAI2rAdYUjwGFoo6N26c9rbZIEeibNUdSPco68oYY_BqKYoK4kGmzGCkUV1HrZopDhcrNfhDYZEiZtNgkNAiKRpjPXblMIeN7tGjORn29DXqxspGio2DhhNIEex-Ih3a5yaW39EgDVgWS2eDBTV0A6u3ZAJkxPctNkVkxehuxSCYVjnAv6dVjKcypzJQLmMXT77VAQ7hOrrd-_iO5cliCtkyoPjkVDYxEZ9bjAaFwkb7xVKdULFSwAyYzvKYas_-tG3mEvhcUynPRGVcJutfHULGYfYxJWkXdQovk7H-l7uo";
+
+    const { bearer_token, max_pages, page, unique_id, driver_status, detail = 'true' } = req.query;
+    const finalToken = bearer_token || HARDCODED_TOKEN;
+
+    // Set SSE headers
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+    });
+
+    const sendEvent = (eventName, data) => {
+        res.write(`event: ${eventName}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const DEFAULT_UNIQUE_ID = unique_id || '03421121304617f701ba3b374.23310242';
+    const DEFAULT_DRIVER_STATUS = driver_status || '2';
+    const REPORT_URL = 'https://app.jagel.id/api/driver/report';
+
+    async function callJagelAppApi(url, bearerToken, method = 'GET', data = null) {
+        const config = {
+            method,
+            url,
+            headers: {
+                'Authorization': `Bearer ${bearerToken}`,
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            timeout: 30000,
+            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
+        };
+        if (method === 'POST' && data) config.data = data;
+        console.log(`🌐 [JAGEL-APP-API] ${method} ${url}`);
+        const response = await axios(config);
+        return response;
+    }
+
+    async function fetchDriverDetail(view_uid) {
+        const detailUrl = `https://app.jagel.id/api/users/${view_uid}?driver=1`;
+        try {
+            const response = await callJagelAppApi(detailUrl, finalToken, 'GET');
+            return response.data;
+        } catch (err) {
+            console.warn(`⚠️ Failed to fetch detail for ${view_uid}: ${err.message}`);
+            return null;
+        }
+    }
+
+    async function fetchDriversReport(pageNum = 1) {
+        const payload = {
+            unique_id: DEFAULT_UNIQUE_ID,
+            paginate: 10,
+            driver_status: parseInt(DEFAULT_DRIVER_STATUS),
+            page: pageNum
+        };
+        try {
+            const response = await callJagelAppApi(REPORT_URL, finalToken, 'POST', payload);
+            return response.data;
+        } catch (err) {
+            console.error(`❌ Failed to fetch report page ${pageNum}:`, err.message);
+            return null;
+        }
+    }
+
+    sendEvent('start', { message: 'Memulai pengambilan data driver' });
+
+    if (page) {
+        const reportData = await fetchDriversReport(parseInt(page));
+        if (!reportData || !reportData.success) {
+            sendEvent('error', { message: 'Gagal mengambil data report' });
+            sendEvent('end', { message: 'Proses gagal' });
+            return res.end();
+        }
+
+        const driversList = reportData.data?.drivers?.data || [];
+
+        if (driversList.length > 0 && detail === 'true') {
+            for (let i = 0; i < driversList.length; i++) {
+                const driver = driversList[i];
+                const detailData = await fetchDriverDetail(driver.view_uid);
+                sendEvent('driver_update', { driver: { ...driver, detail: detailData } });
+                await new Promise(r => setTimeout(r, 100));
+            }
+        } else if (driversList.length > 0) {
+            sendEvent('batch', { drivers: driversList });
+        }
+
+        sendEvent('end', { success: true, total_drivers: driversList.length });
+        return res.end();
+    }
+
+    const limit = Math.min(parseInt(max_pages) || 100, 200);
+    let currentPage = 1;
+    let lastPage = null;
+    let processedDrivers = 0;
+
+    while (currentPage <= limit) {
+        const reportData = await fetchDriversReport(currentPage);
+        if (!reportData || !reportData.success) break;
+
+        const driversData = reportData.data?.drivers;
+        if (!driversData) break;
+
+        const driversList = driversData.data || [];
+
+        if (lastPage === null) {
+            lastPage = driversData.last_page || 0;
+            sendEvent('meta', { total_pages: lastPage, total_drivers: driversData.total || 0 });
+        }
+
+        if (driversList.length === 0) break;
+
+        if (detail === 'true') {
+            for (let i = 0; i < driversList.length; i++) {
+                const driver = driversList[i];
+                const detailData = await fetchDriverDetail(driver.view_uid);
+                processedDrivers++;
+                sendEvent('driver_update', { count: processedDrivers, driver: { ...driver, detail: detailData } });
+                await new Promise(r => setTimeout(r, 100));
+            }
+        } else {
+            processedDrivers += driversList.length;
+            sendEvent('batch', { page: currentPage, drivers: driversList });
+        }
+
+        if (currentPage >= lastPage) break;
+        currentPage++;
+        await new Promise(r => setTimeout(r, 150));
+    }
+
+    sendEvent('complete', { total_drivers: processedDrivers, total_pages: lastPage });
+    sendEvent('end', { success: true });
+    res.end();
+});
+
+// ============================================================
 // ENDPOINT: POST /orders
 // ============================================================
 const VALID_ORDER_STATUSES = ['PENDING', 'SEARCHING', 'CONFIRMED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED', 'COMPLETED', 'CANCELLED', 'FAILED'];
