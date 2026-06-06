@@ -109,6 +109,14 @@ function mysqlNow() {
     return new Date().toISOString().slice(0, 19).replace('T', ' ');
 }
 
+// ✅ Ubah 62xxx -> 08xxx untuk ditampilkan di WhatsApp
+function formatPhoneDisplay(phone) {
+    if (!phone) return '-';
+    let cleaned = phone.toString().replace(/\D/g, '');
+    if (cleaned.startsWith('62')) cleaned = '0' + cleaned.substring(2);
+    return cleaned;
+}
+
 function generatePartnerReff() {
     return `INV-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 }
@@ -674,7 +682,6 @@ app.get('/drivers', async (req, res) => {
 // ============================================================
 app.post('/orders', async (req, res) => {
     console.log('\n🛒 [ORDERS-CREATE] Request:', JSON.stringify(req.body, null, 2));
-
     if (!dbReady) return res.status(503).json({ error: 'Database not ready' });
 
     try {
@@ -692,9 +699,24 @@ app.post('/orders', async (req, res) => {
             orderStatus = 'SEARCHING';
         }
 
+        // ✅ FIX: normalisasi order_items
+        let orderItemsJson = null;
+        if (body.order_items) {
+            try {
+                const parsed = typeof body.order_items === 'string'
+                    ? JSON.parse(body.order_items)
+                    : body.order_items;
+                orderItemsJson = JSON.stringify(parsed);
+                console.log(`✅ order_items parsed: ${parsed.length} toko`);
+            } catch (e) {
+                console.warn('⚠️ order_items parse failed:', e.message);
+                orderItemsJson = typeof body.order_items === 'string' ? body.order_items : null;
+            }
+        }
+
         await pool.execute(`
 INSERT INTO orders (
-order_id, order_status, order_date, order_note,
+order_id, order_status, order_date, order_note, order_items,
 service_type, service_name, service_description,
 origin_address, origin_lat, origin_lng,
 destination_address, destination_lat, destination_lng,
@@ -705,9 +727,9 @@ mitra_id, mitra_name, mitra_phone,
 driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng,
 customer_name, customer_phone,
 created_at, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `, [
-            order_id, orderStatus, body.order_date || now, body.order_note || null,
+            order_id, orderStatus, body.order_date || now, body.order_note || null, orderItemsJson,  // ← +1 kolom
             body.service_type || null, body.service_name || null, body.service_description || null,
             body.origin_address || null, body.origin_lat || null, body.origin_lng || null,
             body.destination_address || null, body.destination_lat || null, body.destination_lng || null,
@@ -964,89 +986,67 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 // ============================================================
 // FUNGSI KIRIM DETAIL ORDER KE DRIVER (TANPA AUTO-CREATE)
 // ============================================================
-// ============================================================
-// FUNGSI KIRIM DETAIL ORDER KE DRIVER (DYNAMIC FROM DATABASE)
-// ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
-
     try {
-        const [orders] = await pool.execute(
-            'SELECT * FROM orders WHERE order_id = ?',
-            [orderId]
-        );
-
-        if (orders.length === 0) {
-            console.error(`❌ Order ${orderId} not found in database!`);
-            return;
-        }
+        const [orders] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [orderId]);
+        if (orders.length === 0) { console.error(`❌ Order ${orderId} not found!`); return; }
 
         const order = orders[0];
-        const totalAmount = order.total_price;
-
-        // ✅ BUILD DETAIL PESANAN DARI order_items (JSON)
         let storesDetailText = '';
 
         if (order.order_items) {
             try {
                 const orderItems = typeof order.order_items === 'string'
-                    ? JSON.parse(order.order_items)
-                    : order.order_items;
+                    ? JSON.parse(order.order_items) : order.order_items;
 
-                // Jika order_items adalah array of stores
                 if (Array.isArray(orderItems)) {
                     for (const store of orderItems) {
                         const storeName = store.name || store.store?.title || 'Toko';
-                        const distance = store.distance || store.store?.distance || 0;
-                        const ongkir = store.ongkir || calcOngkir(distance);
+                        const distance = parseFloat(store.distance || store.store?.distance || 0);
+                        const ongkir = store.ongkir || (distance <= 3 ? 9500 : 9500 + Math.round((distance - 3) * 3500));
 
                         storesDetailText += `🏪 ${storeName}\n`;
                         storesDetailText += ` 📍 Jarak: ${distance.toFixed(1)} km\n`;
                         storesDetailText += ` 🛵 Ongkir: ${formatRupiah(ongkir)}\n`;
                         storesDetailText += ` 🍔 Items:\n`;
 
-                        const items = store.items || Object.values(store).filter(v => v.qty);
+                        const items = store.items || [];  // ✅ tidak pakai Object.values filter qty
                         let subTotal = 0;
-
                         for (const item of items) {
-                            const itemName = item.name || item.prod?.title || 'Item';
-                            const itemPrice = item.price || item.prod?.price || 0;
+                            const itemName = item.name || 'Item';
+                            const itemPrice = item.price || 0;
                             const itemQty = item.qty || 1;
                             const itemSubtotal = itemPrice * itemQty;
                             subTotal += itemSubtotal;
-
                             storesDetailText += ` • ${itemQty}x ${itemName} = ${formatRupiah(itemSubtotal)}\n`;
                         }
-
                         storesDetailText += ` 📝 Subtotal: ${formatRupiah(subTotal)}\n\n`;
                     }
                 }
-            } catch (parseError) {
-                console.error('Error parsing order_items:', parseError.message);
-                storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+            } catch (e) {
+                storesDetailText = 'Detail: ' + (order.order_note || '-');
             }
         } else {
-            // Fallback: gunakan order_note jika tidak ada order_items
-            storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
+            storesDetailText = 'Detail: ' + (order.order_note || '-');
         }
 
-        // Kirim template ke driver
+        // ✅ FIX: nomor customer dalam format 08xxx
+        const customerPhoneDisplay = formatPhoneDisplay(order.customer_phone);
+
         await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
             "1": confirmation.driver_name,
             "2": order.customer_name,
-            "3": order.customer_phone,
+            "3": customerPhoneDisplay,   // ✅ 085600402341 bukan 6285600402341
             "4": orderId,
             "5": storesDetailText,
-            "6": formatRupiah(totalAmount)
+            "6": formatRupiah(order.total_price)
         });
-
-        console.log(`✅ Order details sent to driver`);
-
+        console.log(`✅ Order details sent, customer: ${customerPhoneDisplay}`);
     } catch (error) {
-        console.error(`❌ Error sending order details:`, error.message);
+        console.error(`❌ Error:`, error.message);
     }
 }
-
 // ============================================================
 // FUNGSI NOTIFIKASI KE CUSTOMER (TANPA AUTO-CREATE)
 // ============================================================
@@ -1114,13 +1114,16 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
             storesDetailText = 'Detail pesanan: ' + (order.order_note || '-');
         }
 
+        // ✅ FIX: nomor driver dalam format 08xxx
+        const driverPhoneDisplay = formatPhoneDisplay(confirmation.driver_phone);
+
         await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, {
             "1": order.customer_name,
             "2": confirmation.driver_name,
-            "3": confirmation.driver_phone,
+            "3": driverPhoneDisplay,   // ✅ 08xxx bukan 62xxx
             "4": orderId,
             "5": storesDetailText,
-            "6": formatRupiah(totalAmount)
+            "6": formatRupiah(order.total_price)
         });
 
         console.log(`✅ Customer notification sent to ${order.customer_phone}`);
