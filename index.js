@@ -602,11 +602,17 @@ app.get('/drivers', async (req, res) => {
             driver_status: parseInt(DEFAULT_DRIVER_STATUS),
             page: pageNum
         };
+
+        console.log('[fetchDriversReport] payload:', JSON.stringify(payload));  // ← tambah ini
+        console.log('[fetchDriversReport] token prefix:', finalToken.substring(0, 20) + '...');
+
         try {
             const response = await callJagelAppApi(REPORT_URL, finalToken, 'POST', payload);
             return response.data;
         } catch (err) {
             console.error(`❌ Failed to fetch report page ${pageNum}:`, err.message);
+            console.error('❌ Response status:', err.response?.status);
+            console.error('❌ Response data:', JSON.stringify(err.response?.data));  // ← ini penting
             return null;
         }
     }
