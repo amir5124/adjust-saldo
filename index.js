@@ -52,7 +52,9 @@ const CONFIG = {
     templateDriverOrderAccepted: process.env.TWILIO_TEMPLATE_DRIVER_ACCEPTED || 'HX59e4eb4a2e31316585b76a3fbb2bfc8d',
     templateCustomerOrderConfirmed: process.env.TWILIO_TEMPLATE_CUSTOMER_CONFIRMED || 'HX9e996a15a5f28fb3ec2cdd7d84ab85a2',
     templateDriverRejected: process.env.TWILIO_TEMPLATE_DRIVER_REJECTED || 'HX883e49ca163a114e5674f0be7dd53bec',
-    templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da'
+    templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da',
+    templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HX32aa19ea79647e9e0b208a52595efcc4',
+    templateCustomerOrderReceived: process.env.TWILIO_TEMPLATE_CUSTOMER_DONE || 'HX6b77747905f18bba7ab9dc88a3ef656a',
 };
 
 // ============================================================
@@ -95,6 +97,7 @@ const pool = mysql.createPool({
 // GLOBAL VARIABLES
 // ============================================================
 const driverConfirmations = new Map();
+const pendingCompletions = new Map();
 const LOG_DIR = path.join(__dirname, 'logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -943,59 +946,7 @@ app.post('/send-whatsapp', async (req, res) => {
 });
 
 // ============================================================
-// WEBHOOK WHATSAPP
-// ============================================================
-app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
-    console.log('\n📨 [WEBHOOK] Received:', JSON.stringify(req.body, null, 2));
-
-    const messageBody = req.body.Body || req.body.body;
-    const fromNumber = req.body.From || req.body.from;
-    const buttonPayload = req.body.ButtonPayload;
-
-    if (!messageBody && !buttonPayload) return res.sendStatus(400);
-
-    const rawDriverPhone = fromNumber.replace('whatsapp:', '');
-    const driverPhone = normalizePhoneNumber(rawDriverPhone);
-    const message = (buttonPayload || messageBody || '').trim().toUpperCase();
-
-    console.log(`📱 Driver: ${driverPhone}, Message: ${message}`);
-
-    let foundOrderId = null;
-    let foundConfirmation = null;
-
-    for (const [orderId, confirmation] of driverConfirmations) {
-        if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
-            foundOrderId = orderId;
-            foundConfirmation = confirmation;
-            break;
-        }
-    }
-
-    // Di webhook whatsapp, uncomment baris ini:
-    if (foundOrderId && foundConfirmation && (message === 'ACCEPT' || message === 'TERIMA' || message === 'YES')) {
-        foundConfirmation.status = 'accepted';
-        driverConfirmations.set(foundOrderId, foundConfirmation);
-
-        await pool.execute(`UPDATE orders SET order_status = 'CONFIRMED', updated_at = NOW() WHERE order_id = ?`, [foundOrderId]);
-        console.log(`✅ Order ${foundOrderId} confirmed`);
-
-        await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Pesanan telah dikonfirmasi.');
-
-        // ✅ UNCOMMENT UNTUK MENGIRIM DETAIL
-        await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
-        await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
-    } else if (foundOrderId && foundConfirmation && (message === 'REJECT' || message === 'TOLAK' || message === 'NO')) {
-        foundConfirmation.status = 'rejected';
-        driverConfirmations.set(foundOrderId, foundConfirmation);
-        await pool.execute(`UPDATE orders SET order_status = 'CANCELLED', updated_at = NOW() WHERE order_id = ?`, [foundOrderId]);
-        await sendWhatsAppFreeForm(rawDriverPhone, '❌ Pesanan ditolak.');
-    }
-
-    res.sendStatus(200);
-});
-
-// ============================================================
-// FUNGSI KIRIM DETAIL ORDER KE DRIVER (TANPA AUTO-CREATE)
+// FUNGSI KIRIM DETAIL ORDER KE DRIVER (UPDATED)
 // ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
@@ -1045,7 +996,7 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 
         const customerPhoneDisplay = formatPhoneDisplay(order.customer_phone);
 
-        // ✅ PESAN 1: Template seperti biasa
+        // PESAN 1: Template detail order ke driver
         await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
             "1": String(confirmation.driver_name || 'Driver'),
             "2": String(order.customer_name || '-'),
@@ -1055,14 +1006,13 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             "6": String(formatRupiah(order.total_price))
         });
 
-        // ✅ PESAN 2: Link rute Google Maps (free-form, bisa diklik)
+        // PESAN 2: Link rute Google Maps
         const originLat = order.origin_lat;
         const originLng = order.origin_lng;
         const destLat = order.destination_lat;
         const destLng = order.destination_lng;
 
         if (originLat && originLng && destLat && destLng) {
-            // Link ke toko dulu, lalu ke customer
             const linkKeToko = `https://www.google.com/maps/dir/?api=1&destination=${originLat},${originLng}&travelmode=driving`;
             const linkKeCustomer = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${destLat},${destLng}&travelmode=driving`;
 
@@ -1075,7 +1025,6 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
                 `${order.destination_address || 'Alamat customer'}\n` +
                 `${linkKeCustomer}`;
 
-            // Delay 1 detik agar pesan tidak bertumpuk
             await new Promise(r => setTimeout(r, 1000));
             await sendWhatsAppFreeForm(confirmation.driver_phone, routeMsg);
             console.log(`✅ Route links sent to driver`);
@@ -1083,11 +1032,190 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             console.warn(`⚠️ Koordinat tidak lengkap, skip kirim rute`);
         }
 
-        console.log(`✅ Order details sent to driver`);
+        // PESAN 3: Template quick reply "Pesanan Selesai" — dikirim setelah 5 menit
+        const DELAY_MS = 5 * 60 * 1000; // 5 menit
+        const scheduledAt = Date.now() + DELAY_MS;
+
+        // Simpan ke map untuk dicek di webhook
+        pendingCompletions.set(orderId, {
+            driver_phone: confirmation.driver_phone,
+            customer_phone: order.customer_phone,
+            customer_name: order.customer_name,
+            driver_name: confirmation.driver_name,
+            scheduled_at: scheduledAt,
+            completion_sent: false,
+            status: 'waiting' // waiting | completed | expired
+        });
+
+        setTimeout(async () => {
+            const pending = pendingCompletions.get(orderId);
+            if (!pending || pending.status !== 'waiting') return;
+
+            console.log(`⏰ [COMPLETION-PROMPT] Sending to driver after 5 min: ${orderId}`);
+
+            try {
+                await sendWhatsAppTemplate(pending.driver_phone, CONFIG.templateDriverOrderComplete, {
+                    "1": String(pending.driver_name || 'Driver'),
+                    "2": String(orderId)
+                });
+                pending.completion_sent = true;
+                pendingCompletions.set(orderId, pending);
+                console.log(`✅ Completion prompt sent to driver for order ${orderId}`);
+            } catch (err) {
+                console.error(`❌ Failed to send completion prompt:`, err.message);
+            }
+        }, DELAY_MS);
+
+        console.log(`✅ Order details sent to driver, completion prompt scheduled in 5 min`);
     } catch (error) {
         console.error(`❌ Error sendOrderDetailsToDriver:`, error.message);
     }
 }
+
+// ============================================================
+// FUNGSI CEK APAKAH MASIH DALAM JAM OPERASIONAL (sebelum 00.00 WIT)
+// WIT = UTC+9
+// ============================================================
+function isWithinOperationalHours() {
+    const now = new Date();
+    const witHour = (now.getUTCHours() + 9) % 24;
+    // Aktif dari jam 00.01 sampai 23.59 WIT
+    // Blokir hanya jam 0 (00.00 - 00.59) atau sesuaikan batasnya
+    return witHour >= 6 && witHour < 24; // contoh: aktif jam 06.00 - 23.59 WIT
+}
+
+// ============================================================
+// WEBHOOK WHATSAPP (UPDATED — handle tombol SELESAI & SUDAH)
+// ============================================================
+app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req, res) => {
+    console.log('\n📨 [WEBHOOK] Received:', JSON.stringify(req.body, null, 2));
+
+    const messageBody = req.body.Body || req.body.body;
+    const fromNumber = req.body.From || req.body.from;
+    const buttonPayload = req.body.ButtonPayload;
+
+    if (!messageBody && !buttonPayload) return res.sendStatus(400);
+
+    const rawDriverPhone = fromNumber.replace('whatsapp:', '');
+    const driverPhone = normalizePhoneNumber(rawDriverPhone);
+    const message = (buttonPayload || messageBody || '').trim().toUpperCase();
+
+    console.log(`📱 From: ${driverPhone}, Message: ${message}`);
+
+    // ── HANDLE: Driver klik "PESANAN SELESAI" ──────────────────────────────
+    if (message === 'PESANAN_SELESAI' || message === 'ORDER_COMPLETE') {
+        let matchedOrderId = null;
+        let matchedPending = null;
+
+        for (const [orderId, pending] of pendingCompletions) {
+            if (normalizePhoneNumber(pending.driver_phone) === driverPhone
+                && pending.status === 'waiting'
+                && pending.completion_sent === true) {
+                matchedOrderId = orderId;
+                matchedPending = pending;
+                break;
+            }
+        }
+
+        if (!matchedOrderId || !matchedPending) {
+            console.warn(`⚠️ No pending completion found for driver ${driverPhone}`);
+            await sendWhatsAppFreeForm(rawDriverPhone, '⚠️ Tidak ada pesanan aktif yang menunggu konfirmasi selesai.');
+            return res.sendStatus(200);
+        }
+
+        // Update status order ke DELIVERED
+        matchedPending.status = 'completed';
+        pendingCompletions.set(matchedOrderId, matchedPending);
+
+        await pool.execute(
+            `UPDATE orders SET order_status = 'DELIVERED', updated_at = NOW() WHERE order_id = ?`,
+            [matchedOrderId]
+        );
+        console.log(`✅ Order ${matchedOrderId} marked as DELIVERED`);
+
+        await sendWhatsAppFreeForm(rawDriverPhone, `✅ Terima kasih! Pesanan *${matchedOrderId}* telah ditandai selesai.`);
+
+        // Kirim template konfirmasi ke customer — hanya jika masih dalam jam operasional
+        if (isWithinOperationalHours()) {
+            const customerRawPhone = matchedPending.customer_phone.startsWith('+')
+                ? matchedPending.customer_phone
+                : `+${matchedPending.customer_phone}`;
+
+            try {
+                await sendWhatsAppTemplate(
+                    normalizePhoneNumber(matchedPending.customer_phone),
+                    CONFIG.templateCustomerOrderReceived,
+                    {
+                        "1": String(matchedPending.customer_name || 'Pelanggan'),
+                        "2": String(matchedOrderId)
+                    }
+                );
+                console.log(`✅ Customer confirmation template sent for order ${matchedOrderId}`);
+            } catch (err) {
+                console.error(`❌ Failed to send customer confirmation:`, err.message);
+            }
+        } else {
+            console.log(`⏰ Lewat jam operasional, skip kirim konfirmasi ke customer`);
+        }
+
+        return res.sendStatus(200);
+    }
+
+    // ── HANDLE: Customer klik "SUDAH TERIMA" ──────────────────────────────
+    if (message === 'SUDAH_TERIMA' || message === 'ORDER_RECEIVED') {
+        // Cari order berdasarkan nomor customer
+        const [rows] = await pool.execute(
+            `SELECT order_id, customer_name FROM orders WHERE customer_phone LIKE ? AND order_status = 'DELIVERED' ORDER BY updated_at DESC LIMIT 1`,
+            [`%${driverPhone.replace('+', '')}%`]
+        );
+
+        if (rows.length === 0) {
+            console.warn(`⚠️ No delivered order found for customer ${driverPhone}`);
+            return res.sendStatus(200);
+        }
+
+        const orderId = rows[0].order_id;
+        await pool.execute(
+            `UPDATE orders SET order_status = 'COMPLETED', updated_at = NOW() WHERE order_id = ?`,
+            [orderId]
+        );
+        console.log(`✅ Order ${orderId} fully COMPLETED by customer`);
+
+        await sendWhatsAppFreeForm(rawDriverPhone, `✅ Terima kasih sudah mengkonfirmasi! Pesanan *${orderId}* telah selesai. 🎉`);
+
+        return res.sendStatus(200);
+    }
+
+    // ── HANDLE: Accept / Reject driver (kode lama) ─────────────────────────
+    let foundOrderId = null;
+    let foundConfirmation = null;
+
+    for (const [orderId, confirmation] of driverConfirmations) {
+        if (confirmation.driver_phone === driverPhone && confirmation.status === 'pending') {
+            foundOrderId = orderId;
+            foundConfirmation = confirmation;
+            break;
+        }
+    }
+
+    if (foundOrderId && foundConfirmation && (message === 'ACCEPT' || message === 'TERIMA' || message === 'YES')) {
+        foundConfirmation.status = 'accepted';
+        driverConfirmations.set(foundOrderId, foundConfirmation);
+        await pool.execute(`UPDATE orders SET order_status = 'CONFIRMED', updated_at = NOW() WHERE order_id = ?`, [foundOrderId]);
+        console.log(`✅ Order ${foundOrderId} confirmed`);
+        await sendWhatsAppFreeForm(rawDriverPhone, '✅ Terima kasih! Pesanan telah dikonfirmasi.');
+        await sendOrderDetailsToDriver(foundOrderId, foundConfirmation);
+        await notifyCustomerOrderAccepted(foundOrderId, foundConfirmation);
+
+    } else if (foundOrderId && foundConfirmation && (message === 'REJECT' || message === 'TOLAK' || message === 'NO')) {
+        foundConfirmation.status = 'rejected';
+        driverConfirmations.set(foundOrderId, foundConfirmation);
+        await pool.execute(`UPDATE orders SET order_status = 'CANCELLED', updated_at = NOW() WHERE order_id = ?`, [foundOrderId]);
+        await sendWhatsAppFreeForm(rawDriverPhone, '❌ Pesanan ditolak.');
+    }
+
+    res.sendStatus(200);
+});
 
 async function notifyCustomerOrderAccepted(orderId, confirmation) {
     console.log(`📧 [NOTIFY-CUSTOMER] Order: ${orderId}`);
