@@ -49,12 +49,14 @@ const CONFIG = {
 
     // Twilio Template SIDs
     templateDriverConfirmation: process.env.TWILIO_TEMPLATE_DRIVER_CONFIRMATION || 'HX0f899a4bc82aca9611ef757228c3ba61',
-    templateDriverOrderAccepted: process.env.TWILIO_TEMPLATE_DRIVER_ACCEPTED || 'HX59e4eb4a2e31316585b76a3fbb2bfc8d',
+    templateDriverOrderAccepted: process.env.TWILIO_TEMPLATE_DRIVER_ACCEPTED || 'HX05ecb4baa13a96aee45215801328be65',
     templateCustomerOrderConfirmed: process.env.TWILIO_TEMPLATE_CUSTOMER_CONFIRMED || 'HX9e996a15a5f28fb3ec2cdd7d84ab85a2',
     templateDriverRejected: process.env.TWILIO_TEMPLATE_DRIVER_REJECTED || 'HX883e49ca163a114e5674f0be7dd53bec',
     templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da',
     templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HXd9c08ad72d426231bbf65dd4eb3e8177',
     templateCustomerOrderReceived: process.env.TWILIO_TEMPLATE_CUSTOMER_DONE || 'HX5d8d7be440261e9d34c9152074e0242d',
+    templateMitraOrderNotify: process.env.TWILIO_TEMPLATE_MITRA_NOTIFY || 'HX7645fe3838f314b321d34c8e8c868bee', // BARU
+
 };
 
 // ============================================================
@@ -713,7 +715,6 @@ app.post('/orders', async (req, res) => {
             orderStatus = 'SEARCHING';
         }
 
-        // ✅ FIX: normalisasi order_items
         let orderItemsJson = null;
         if (body.order_items) {
             try {
@@ -730,32 +731,36 @@ app.post('/orders', async (req, res) => {
 
         await pool.execute(`
 INSERT INTO orders (
-order_id, order_status, order_date, order_note, order_items,
-service_type, service_name, service_description,
-origin_address, origin_lat, origin_lng,
-destination_address, destination_lat, destination_lng,
-distance_km, estimated_duration_min,
-base_price, service_fee, discount, total_price,
-payment_method, payment_status, partner_reff,
-mitra_id, mitra_name, mitra_phone,
-driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng,
-customer_name, customer_phone,
-created_at, updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    order_id, order_status, order_date, order_note, order_items,
+    service_type, service_name, service_description,
+    origin_address, origin_lat, origin_lng,
+    destination_address, destination_lat, destination_lng,
+    distance_km, estimated_duration_min,
+    base_price, service_fee, discount, total_price,
+    payment_method, payment_status, partner_reff,
+    mitra_id, mitra_name, mitra_username, mitra_phone, partner_commission,
+    driver_id, driver_name, driver_phone, driver_photo, driver_address, driver_lat, driver_lng,
+    customer_name, customer_phone,
+    created_at, updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `, [
-            order_id, orderStatus, body.order_date || now, body.order_note || null, orderItemsJson,  // ← +1 kolom
+            order_id, orderStatus, body.order_date || now, body.order_note || null, orderItemsJson,
             body.service_type || null, body.service_name || null, body.service_description || null,
             body.origin_address || null, body.origin_lat || null, body.origin_lng || null,
             body.destination_address || null, body.destination_lat || null, body.destination_lng || null,
             body.distance_km || null, body.estimated_duration_min || null,
             body.base_price || 0, body.service_fee || 0, body.discount || 0, parsedTotal,
             body.payment_method || null, body.payment_status || 'UNPAID', body.partner_reff || null,
-            body.mitra_id || null, body.mitra_name || null, body.mitra_phone || null,
+            body.mitra_id || null, body.mitra_name || null,
+            body.mitra_username || null,   // ← mitra_username
+            body.mitra_phone || null,
+            body.partner_commission || 0,  // ← partner_commission
             body.driver_id || null, body.driver_name || null, body.driver_phone || null,
             body.driver_photo || null, body.driver_address || null, body.driver_lat || null, body.driver_lng || null,
             body.customer_name, body.customer_phone, now, now
         ]);
 
+        console.log(`✅ Order created: ${order_id} | mitra: ${body.mitra_username || '-'} | commission: ${body.partner_commission || 0}%`);
         res.status(201).json({ success: true, message: 'Order berhasil dibuat', order_id, order_status: orderStatus });
     } catch (err) {
         console.error('❌ [ORDERS-CREATE] Error:', err.message);
@@ -945,9 +950,6 @@ app.post('/send-whatsapp', async (req, res) => {
     res.json(result);
 });
 
-// ============================================================
-// FUNGSI KIRIM DETAIL ORDER KE DRIVER (UPDATED)
-// ============================================================
 async function sendOrderDetailsToDriver(orderId, confirmation) {
     console.log(`📦 [SEND-ORDER-DETAILS] Order: ${orderId}`);
     try {
@@ -996,14 +998,29 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
 
         const customerPhoneDisplay = formatPhoneDisplay(order.customer_phone);
 
-        // PESAN 1: Template detail order ke driver
+        // ── Ambil info mitra dari order ──
+        const mitraUsername = order.mitra_name || order.mitra_id || '-';
+        const mitraPhoneDisplay = order.mitra_phone ? formatPhoneDisplay(order.mitra_phone) : '-';
+
+        // Ambil nama toko pertama dari order_items sebagai identitas mitra
+        let mitraStoreName = '-';
+        try {
+            const orderItems = typeof order.order_items === 'string'
+                ? JSON.parse(order.order_items) : order.order_items;
+            if (Array.isArray(orderItems) && orderItems.length > 0) {
+                mitraStoreName = orderItems[0]?.name || orderItems[0]?.store?.title || '-';
+            }
+        } catch (e) { }
+
         await sendWhatsAppTemplate(confirmation.driver_phone, CONFIG.templateDriverOrderAccepted, {
             "1": String(confirmation.driver_name || 'Driver'),
             "2": String(order.customer_name || '-'),
             "3": String(customerPhoneDisplay),
             "4": String(orderId),
             "5": String(storesDetailText),
-            "6": String(formatRupiah(order.total_price))
+            "6": String(formatRupiah(order.total_price)),
+            "7": String(mitraStoreName),  // ← nama toko, bukan username
+            "8": String(mitraPhoneDisplay)
         });
 
         // PESAN 2: Link rute Google Maps
@@ -1017,11 +1034,11 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             const linkKeCustomer = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${destLat},${destLng}&travelmode=driving`;
 
             const routeMsg =
-                `🗺️ *RUTE PENGANTARAN*\n\n` +
-                `📍 *1. Menuju Toko:*\n` +
+                `RUTE PENGANTARAN\n\n` +
+                `1. Menuju Toko:\n` +
                 `${order.origin_address || 'Alamat toko'}\n` +
                 `${linkKeToko}\n\n` +
-                `🏠 *2. Menuju Customer:*\n` +
+                `2. Menuju Customer:\n` +
                 `${order.destination_address || 'Alamat customer'}\n` +
                 `${linkKeCustomer}`;
 
@@ -1032,11 +1049,13 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             console.warn(`⚠️ Koordinat tidak lengkap, skip kirim rute`);
         }
 
-        // PESAN 3: Template quick reply "Pesanan Selesai" — dikirim setelah 5 menit
-        const DELAY_MS = 5 * 60 * 1000; // 5 menit
+        // PESAN 3: Notifikasi ke mitra
+        await notifyMitraNewOrder(orderId, order, confirmation);
+
+        // PESAN 4: Template quick reply "Pesanan Selesai" — dikirim setelah 5 menit
+        const DELAY_MS = 5 * 60 * 1000;
         const scheduledAt = Date.now() + DELAY_MS;
 
-        // Simpan ke map untuk dicek di webhook
         pendingCompletions.set(orderId, {
             driver_phone: confirmation.driver_phone,
             customer_phone: order.customer_phone,
@@ -1044,7 +1063,7 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             driver_name: confirmation.driver_name,
             scheduled_at: scheduledAt,
             completion_sent: false,
-            status: 'waiting' // waiting | completed | expired
+            status: 'waiting'
         });
 
         setTimeout(async () => {
@@ -1052,7 +1071,6 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             if (!pending || pending.status !== 'waiting') return;
 
             console.log(`⏰ [COMPLETION-PROMPT] Sending to driver after 5 min: ${orderId}`);
-
             try {
                 await sendWhatsAppTemplate(pending.driver_phone, CONFIG.templateDriverOrderComplete, {
                     "1": String(pending.driver_name || 'Driver'),
@@ -1066,12 +1084,82 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             }
         }, DELAY_MS);
 
-        console.log(`✅ Order details sent to driver, completion prompt scheduled in 5 min`);
+        console.log(`✅ Order details sent to driver, mitra notified, completion prompt scheduled in 5 min`);
     } catch (error) {
         console.error(`❌ Error sendOrderDetailsToDriver:`, error.message);
     }
 }
 
+// ============================================================
+// FUNGSI NOTIFIKASI KE MITRA
+// ============================================================
+async function notifyMitraNewOrder(orderId, order, confirmation) {
+    console.log(`📧 [NOTIFY-MITRA] Order: ${orderId}`);
+
+    if (!order.mitra_phone) {
+        console.warn(`⚠️ Mitra phone tidak ada, skip notifikasi mitra`);
+        return;
+    }
+
+    try {
+        // Hitung komisi mitra
+        const partnerCommission = order.partner_commission || 0;
+        const totalPrice = order.total_price || 0;
+        const komisiNominal = Math.round(totalPrice * (partnerCommission / 100));
+
+        const driverPhoneDisplay = formatPhoneDisplay(confirmation.driver_phone);
+        const mitraUsername = order.mitra_name || order.mitra_id || 'Mitra';
+
+        // Buat ringkasan pesanan singkat untuk mitra
+        let orderSummary = '-';
+        if (order.order_items) {
+            try {
+                const orderItems = typeof order.order_items === 'string'
+                    ? JSON.parse(order.order_items) : order.order_items;
+                if (Array.isArray(orderItems) && orderItems.length > 0) {
+                    const parts = [];
+                    for (const store of orderItems) {
+                        const storeName = store.name || store.store?.title || 'Toko';
+                        const items = store.items || [];
+                        const itemNames = items.map(i => `${i.qty || 1}x ${i.name}`).join(', ');
+                        parts.push(`${storeName}: ${itemNames}`);
+                    }
+                    orderSummary = parts.join(' | ');
+                }
+            } catch (e) {
+                orderSummary = order.order_note || '-';
+            }
+        }
+
+        orderSummary = orderSummary.replace(/\r?\n|\r/g, ' ').trim();
+        if (orderSummary.length > 500) orderSummary = orderSummary.substring(0, 497) + '...';
+
+        // Ambil nama toko dari order_items
+        let mitraStoreName = '-';
+        try {
+            const orderItems = typeof order.order_items === 'string'
+                ? JSON.parse(order.order_items) : order.order_items;
+            if (Array.isArray(orderItems) && orderItems.length > 0) {
+                mitraStoreName = orderItems[0]?.name || orderItems[0]?.store?.title || '-';
+            }
+        } catch (e) { }
+
+        await sendWhatsAppTemplate(order.mitra_phone, CONFIG.templateMitraOrderNotify, {
+            "1": String(mitraStoreName),          // ← nama toko
+            "2": String(orderId),
+            "3": String(order.customer_name || '-'),
+            "4": String(orderSummary),
+            "5": String(formatRupiah(totalPrice)),
+            "6": String(confirmation.driver_name || 'Driver'),
+            "7": String(driverPhoneDisplay)
+            // hapus variabel komisi {{8}} dan {{9}}
+        });
+
+        console.log(`✅ Mitra notified: ${order.mitra_phone}`);
+    } catch (err) {
+        console.error(`❌ Error notifyMitraNewOrder:`, err.message);
+    }
+}
 // ============================================================
 // FUNGSI CEK APAKAH MASIH DALAM JAM OPERASIONAL (sebelum 00.00 WIT)
 // WIT = UTC+9
