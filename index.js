@@ -53,8 +53,8 @@ const CONFIG = {
     templateCustomerOrderConfirmed: process.env.TWILIO_TEMPLATE_CUSTOMER_CONFIRMED || 'HX9e996a15a5f28fb3ec2cdd7d84ab85a2',
     templateDriverRejected: process.env.TWILIO_TEMPLATE_DRIVER_REJECTED || 'HX883e49ca163a114e5674f0be7dd53bec',
     templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da',
-    templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HX32aa19ea79647e9e0b208a52595efcc4',
-    templateCustomerOrderReceived: process.env.TWILIO_TEMPLATE_CUSTOMER_DONE || 'HX6b77747905f18bba7ab9dc88a3ef656a',
+    templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HXd9c08ad72d426231bbf65dd4eb3e8177',
+    templateCustomerOrderReceived: process.env.TWILIO_TEMPLATE_CUSTOMER_DONE || 'HX5d8d7be440261e9d34c9152074e0242d',
 };
 
 // ============================================================
