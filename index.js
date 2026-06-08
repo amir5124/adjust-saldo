@@ -26,8 +26,7 @@ app.use(express.urlencoded({ extended: true }));
 // ============================================================
 // KONFIGURASI
 // ============================================================
-const API_KEY_JAGEL = process.env.JAGEL_APIKEY || "c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO";
-const JAGEL_BASE_URL = process.env.JAGEL_BASE_URL || "https://api.jagel.id/v1";
+
 
 const CONFIG = {
     clientId: process.env.LINKQU_CLIENT_ID || 'testing',
@@ -36,7 +35,7 @@ const CONFIG = {
     pin: process.env.LINKQU_PIN || '2K2NPCBBNNTovgB',
     serverKey: process.env.LINKQU_SERVER_KEY || 'LinkQu@2020',
     callbackUrl: process.env.CALLBACK_URL || 'https://jagel.siappgo.id/callback',
-    jagelApiKey: process.env.JAGEL_APIKEY || 'q2t7lktZkZIEiCDs7y9HpWP0WCRdABEGTrHidEUhrAMe0IDzXV',
+    jagelApiKey: process.env.JAGEL_APIKEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO',
     linkquGateway: process.env.LINKQU_GATEWAY || 'https://gateway-dev.linkqu.id/linkqu-partner',
     jagelBaseUrl: process.env.JAGEL_BASE_URL || 'https://api.jagel.id/v1',
     port: parseInt(process.env.PORT || '3000'),
@@ -55,7 +54,7 @@ const CONFIG = {
     templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da',
     templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HXd9c08ad72d426231bbf65dd4eb3e8177',
     templateCustomerOrderReceived: process.env.TWILIO_TEMPLATE_CUSTOMER_DONE || 'HX5d8d7be440261e9d34c9152074e0242d',
-    templateMitraOrderNotify: process.env.TWILIO_TEMPLATE_MITRA_NOTIFY || 'HX7645fe3838f314b321d34c8e8c868bee', // BARU
+    templateMitraOrderNotify: process.env.TWILIO_TEMPLATE_MITRA_NOTIFY || 'HX7645fe3838f314b321d34c8e8c868bee',
 
 };
 
@@ -100,6 +99,43 @@ const pool = mysql.createPool({
 // ============================================================
 const driverConfirmations = new Map();
 const pendingCompletions = new Map();
+
+// ============================================================
+// SCHEDULER: Auto-complete order DELIVERED yang belum dikonfirmasi 24 jam
+// Cek setiap 30 menit
+// ============================================================
+setInterval(async () => {
+    console.log(`\n⏰ [AUTO-SETTLE] Checking unconfirmed delivered orders...`);
+    try {
+        const [rows] = await pool.execute(`
+            SELECT * FROM orders 
+            WHERE order_status = 'DELIVERED' 
+            AND updated_at <= NOW() - INTERVAL 24 HOUR
+        `);
+
+        if (rows.length === 0) {
+            console.log(`✅ [AUTO-SETTLE] No pending orders found`);
+            return;
+        }
+
+        console.log(`⚠️ [AUTO-SETTLE] Found ${rows.length} order(s) to auto-settle`);
+
+        for (const order of rows) {
+            console.log(`⏰ [AUTO-SETTLE] Processing: ${order.order_id}`);
+            try {
+                await processOrderSettlement(order);
+                console.log(`✅ [AUTO-SETTLE] Settled: ${order.order_id}`);
+            } catch (err) {
+                console.error(`❌ [AUTO-SETTLE] Failed ${order.order_id}:`, err.message);
+            }
+            // Delay antar order agar tidak flood API
+            await new Promise(r => setTimeout(r, 500));
+        }
+    } catch (err) {
+        console.error(`❌ [AUTO-SETTLE] Error:`, err.message);
+    }
+}, 30 * 60 * 1000); // cek setiap 30 menit
+
 const LOG_DIR = path.join(__dirname, 'logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
@@ -212,6 +248,142 @@ async function addBalanceToAmir(amount, customerName, methodCode, serialNumber) 
         console.error('❌ Add balance failed:', error.message);
         throw error;
     }
+}
+
+// Adjust saldo by phone number
+async function adjustBalanceByPhone(phone, amount, note) {
+    console.log(`💰 [ADJUST-BALANCE] phone: ${phone} | amount: ${amount} | note: ${note}`);
+    try {
+        const response = await axios.post(`${CONFIG.jagelBaseUrl}/balance/adjust`, {
+            action: 'adjust_balance',
+            type: 'phone',
+            value: phone,
+            amount: amount,
+            note: note,
+            apikey: CONFIG.jagelApiKey
+        }, { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
+        console.log(`✅ Balance adjusted:`, response.data);
+        return { success: true, data: response.data };
+    } catch (err) {
+        console.error(`❌ Adjust balance failed:`, err.message);
+        return { success: false, error: err.message };
+    }
+}
+
+// ============================================================
+// FUNGSI SETTLEMENT — dipanggil saat customer konfirmasi ATAU timeout 24 jam
+// ============================================================
+async function processOrderSettlement(order) {
+    const orderId = order.order_id;
+    console.log(`\n💰 [SETTLEMENT] Processing: ${orderId}`);
+
+    // Cegah double settlement
+    const [check] = await pool.execute(
+        `SELECT order_status FROM orders WHERE order_id = ?`, [orderId]
+    );
+    if (check[0]?.order_status === 'COMPLETED') {
+        console.log(`⚠️ [SETTLEMENT] Already completed, skip: ${orderId}`);
+        return;
+    }
+
+    const totalPrice = parseInt(order.total_price) || 0;
+    const paymentMethod = (order.payment_method || '').toUpperCase();
+    const partnerCommission = parseFloat(order.partner_commission) || 0;
+    const isQris = paymentMethod === 'QRIS';
+
+    // Biaya admin
+    const adminFeeRate = isQris ? 0.008 : 0;
+    const adminFeeFlat = isQris ? 0 : 2500;
+
+    // Hitung ongkir dan harga barang dari order_items
+    let totalOngkir = 0;
+    let totalHargaBarang = 0;
+
+    if (order.order_items) {
+        try {
+            const orderItems = typeof order.order_items === 'string'
+                ? JSON.parse(order.order_items) : order.order_items;
+
+            if (Array.isArray(orderItems)) {
+                for (const store of orderItems) {
+                    const distance = parseFloat(store.distance || store.store?.distance || 0);
+                    const ongkir = store.ongkir || (distance <= 3 ? 9500 : 9500 + Math.round((distance - 3) * 3500));
+                    totalOngkir += ongkir;
+
+                    for (const item of store.items || []) {
+                        totalHargaBarang += (item.price || 0) * (item.qty || 1);
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('❌ Parse order_items error:', e.message);
+            totalOngkir = parseInt(order.service_fee) || 0;
+            totalHargaBarang = parseInt(order.base_price) || 0;
+        }
+    }
+
+    // ── Hitung bagian MITRA ──────────────────────────────────
+    // QRIS: Produk - partner_commission% - 0.8%
+    // VA  : Produk - partner_commission% - 2500
+    const komisiBarangBruto = Math.round(totalHargaBarang * (partnerCommission / 100));
+    let mitraAmount = 0;
+    if (isQris) {
+        mitraAmount = komisiBarangBruto - Math.round(komisiBarangBruto * adminFeeRate);
+    } else {
+        mitraAmount = Math.max(0, komisiBarangBruto - adminFeeFlat);
+    }
+
+    // ── Hitung bagian DRIVER ─────────────────────────────────
+    // QRIS: Ongkir - 8% - 0.8%
+    // VA  : Ongkir - 8% - 2500
+    const ongkirAfterKomisi = Math.round(totalOngkir * (1 - 0.08)); // Ongkir - 8%
+    let driverAmount = 0;
+    if (isQris) {
+        driverAmount = ongkirAfterKomisi - Math.round(ongkirAfterKomisi * adminFeeRate);
+    } else {
+        driverAmount = Math.max(0, ongkirAfterKomisi - adminFeeFlat);
+    }
+
+    console.log(`   Payment    : ${paymentMethod}`);
+    console.log(`   Ongkir     : Rp ${totalOngkir.toLocaleString('id-ID')}`);
+    console.log(`   Harga barang: Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
+    console.log(`   Komisi mitra (bruto): Rp ${komisiBarangBruto.toLocaleString('id-ID')} (${partnerCommission}%)`);
+    console.log(`   Mitra dapat : Rp ${mitraAmount.toLocaleString('id-ID')}`);
+    console.log(`   Ongkir-8%  : Rp ${ongkirAfterKomisi.toLocaleString('id-ID')}`);
+    console.log(`   Driver dapat: Rp ${driverAmount.toLocaleString('id-ID')}`);
+
+    // ── Adjust saldo MITRA ───────────────────────────────────
+    if (order.mitra_phone && mitraAmount > 0) {
+        const mitraNote = `Komisi order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} x ${partnerCommission}% = ${formatRupiah(komisiBarangBruto)} - admin = ${formatRupiah(mitraAmount)}`;
+        const mitraResult = await adjustBalanceByPhone(
+            formatPhoneDisplay(order.mitra_phone),
+            mitraAmount,
+            mitraNote
+        );
+        console.log(`✅ Mitra saldo: ${mitraResult.success ? 'OK' : mitraResult.error}`);
+    } else {
+        console.warn(`⚠️ Skip mitra: phone=${order.mitra_phone}, amount=${mitraAmount}`);
+    }
+
+    // ── Adjust saldo DRIVER ──────────────────────────────────
+    if (order.driver_phone && driverAmount > 0) {
+        const driverNote = `Pendapatan order ${orderId} | Ongkir ${formatRupiah(totalOngkir)} - 8% - admin = ${formatRupiah(driverAmount)}`;
+        const driverResult = await adjustBalanceByPhone(
+            formatPhoneDisplay(order.driver_phone),
+            driverAmount,
+            driverNote
+        );
+        console.log(`✅ Driver saldo: ${driverResult.success ? 'OK' : driverResult.error}`);
+    } else {
+        console.warn(`⚠️ Skip driver: phone=${order.driver_phone}, amount=${driverAmount}`);
+    }
+
+    // ── Update status COMPLETED ──────────────────────────────
+    await pool.execute(
+        `UPDATE orders SET order_status = 'COMPLETED', updated_at = NOW() WHERE order_id = ?`,
+        [orderId]
+    );
+    console.log(`✅ [SETTLEMENT] Done: ${orderId}`);
 }
 
 // ============================================================
@@ -511,48 +683,41 @@ app.post('/callback', async (req, res) => {
             `SELECT status, customer_name, amount, bank_code as method_code, 'VA' as type FROM inquiry_va WHERE partner_reff = ? FOR UPDATE`,
             [finalPartnerReff]
         );
-        if (rows.length > 0) {
-            tableName = 'inquiry_va';
-            dbData = rows[0];
-        }
+        if (rows.length > 0) { tableName = 'inquiry_va'; dbData = rows[0]; }
 
         if (!tableName) {
             [rows] = await connection.execute(
                 `SELECT status, customer_name, amount, 'QRIS' as method_code, 'QRIS' as type FROM inquiry_qris WHERE partner_reff = ? FOR UPDATE`,
                 [finalPartnerReff]
             );
-            if (rows.length > 0) {
-                tableName = 'inquiry_qris';
-                dbData = rows[0];
-            }
+            if (rows.length > 0) { tableName = 'inquiry_qris'; dbData = rows[0]; }
         }
 
         if (!tableName || !dbData) {
             await connection.rollback();
-            console.error(`❌ Transaction not found: ${finalPartnerReff}`);
             return res.status(404).json({ error: 'Data transaksi tidak ditemukan' });
         }
 
-        const isPaid = status === 'SUCCESS' || status === 'SUKSES' || transaction_status === 'SUCCESS' || dbData.status === 'SUKSES';
-
         if (dbData.status === 'SUKSES') {
             await connection.rollback();
-            console.log(`ℹ️ Already processed: ${finalPartnerReff}`);
             return res.json({ message: 'Sudah diproses sebelumnya.' });
         }
+
+        const isPaid = status === 'SUCCESS' || status === 'SUKSES' || transaction_status === 'SUCCESS';
 
         if (isPaid) {
             await connection.execute(`UPDATE ${tableName} SET status = 'SUKSES' WHERE partner_reff = ?`, [finalPartnerReff]);
             await connection.commit();
-            console.log(`✅ Payment confirmed for ${finalPartnerReff}`);
 
-            const methodCode = dbData.method_code === 'QRIS' ? 'QRIS' : 'VA';
-            await addBalanceToAmir(dbData.amount, dbData.customer_name, methodCode, finalPartnerReff);
-            console.log(`🎉 Saldo ditambahkan ke akun amir: Rp ${dbData.amount} dari ${dbData.customer_name}`);
-            res.json({ success: true, message: 'Callback processed, balance added to amir' });
+            // ✅ Adjust saldo amir PENUH tanpa potongan
+            const fullAmount = parseInt(dbData.amount);
+            const note = `Pembayaran masuk dari ${dbData.customer_name} | ${dbData.method_code} | Reff: ${finalPartnerReff}`;
+            await adjustBalanceByPhone(CONFIG.csNumber, fullAmount, note);
+            console.log(`✅ Saldo amir +${fullAmount} (penuh)`);
+
+            res.json({ success: true, message: 'Callback processed, saldo amir ditambahkan penuh' });
         } else {
             await connection.commit();
-            console.log(`ℹ️ Payment not confirmed yet for ${finalPartnerReff}`);
             res.json({ success: false, message: 'Payment not confirmed yet' });
         }
     } catch (err) {
@@ -1251,9 +1416,8 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 
     // ── HANDLE: Customer klik "SUDAH TERIMA" ──────────────────────────────
     if (message === 'SUDAH_TERIMA' || message === 'ORDER_RECEIVED') {
-        // Cari order berdasarkan nomor customer
         const [rows] = await pool.execute(
-            `SELECT order_id, customer_name FROM orders WHERE customer_phone LIKE ? AND order_status = 'DELIVERED' ORDER BY updated_at DESC LIMIT 1`,
+            `SELECT * FROM orders WHERE customer_phone LIKE ? AND order_status = 'DELIVERED' ORDER BY updated_at DESC LIMIT 1`,
             [`%${driverPhone.replace('+', '')}%`]
         );
 
@@ -1262,14 +1426,12 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
             return res.sendStatus(200);
         }
 
-        const orderId = rows[0].order_id;
-        await pool.execute(
-            `UPDATE orders SET order_status = 'COMPLETED', updated_at = NOW() WHERE order_id = ?`,
-            [orderId]
-        );
-        console.log(`✅ Order ${orderId} fully COMPLETED by customer`);
+        const order = rows[0];
 
-        await sendWhatsAppFreeForm(rawDriverPhone, `✅ Terima kasih sudah mengkonfirmasi! Pesanan *${orderId}* telah selesai. 🎉`);
+        await sendWhatsAppFreeForm(rawDriverPhone, `Terima kasih sudah mengkonfirmasi! Pesanan ${order.order_id} telah selesai.`);
+
+        // Settlement dipanggil — update COMPLETED + adjust saldo driver & mitra
+        await processOrderSettlement(order);
 
         return res.sendStatus(200);
     }
