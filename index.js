@@ -1270,57 +1270,73 @@ async function notifyMitraNewOrder(orderId, order, confirmation) {
     }
 
     try {
-        // Hitung komisi mitra
-        const partnerCommission = order.partner_commission || 0;
-        const totalPrice = order.total_price || 0;
-        const komisiNominal = Math.round(totalPrice * (partnerCommission / 100));
+        const partnerCommission = parseFloat(order.partner_commission) || 0;
+        const partnerDivider = 1 + (partnerCommission / 100); // 10% → 1.10
 
-        const driverPhoneDisplay = formatPhoneDisplay(confirmation.driver_phone);
-        const mitraUsername = order.mitra_name || order.mitra_id || 'Mitra';
-
-        // Buat ringkasan pesanan singkat untuk mitra
+        // ── Hitung harga PRODUK saja dari order_items (tanpa ongkir) ──
+        let totalHargaProduk = 0;
         let orderSummary = '-';
+        let mitraStoreName = '-';
+
         if (order.order_items) {
             try {
                 const orderItems = typeof order.order_items === 'string'
                     ? JSON.parse(order.order_items) : order.order_items;
+
                 if (Array.isArray(orderItems) && orderItems.length > 0) {
+                    // Nama toko pertama
+                    mitraStoreName = orderItems[0]?.name || orderItems[0]?.store?.title || '-';
+
                     const parts = [];
                     for (const store of orderItems) {
                         const storeName = store.name || store.store?.title || 'Toko';
                         const items = store.items || [];
+
+                        // Hitung harga produk saja, TIDAK tambah ongkir
+                        for (const item of items) {
+                            totalHargaProduk += (item.price || 0) * (item.qty || 1);
+                        }
+
                         const itemNames = items.map(i => `${i.qty || 1}x ${i.name}`).join(', ');
                         parts.push(`${storeName}: ${itemNames}`);
                     }
                     orderSummary = parts.join(' | ');
                 }
             } catch (e) {
+                console.warn(`⚠️ Parse order_items failed:`, e.message);
                 orderSummary = order.order_note || '-';
             }
         }
 
+        // Fallback jika order_items kosong
+        if (totalHargaProduk === 0) {
+            totalHargaProduk = parseInt(order.base_price) || 0;
+            console.warn(`⚠️ Fallback ke base_price: ${totalHargaProduk}`);
+        }
+
+        // Mitra dapat = harga_produk ÷ partnerDivider
+        // Contoh: Rp 100.000 ÷ 1.10 = Rp 90.909
+        const mitraAmount = Math.round(totalHargaProduk / partnerDivider);
+        const potongan = totalHargaProduk - mitraAmount;
+
+        console.log(`   [MITRA-NOTIFY] harga_produk : ${formatRupiah(totalHargaProduk)}`);
+        console.log(`   [MITRA-NOTIFY] partner_comm : ${partnerCommission}% (÷${partnerDivider})`);
+        console.log(`   [MITRA-NOTIFY] potongan     : ${formatRupiah(potongan)}`);
+        console.log(`   [MITRA-NOTIFY] mitra_dapat  : ${formatRupiah(mitraAmount)}`);
+
         orderSummary = orderSummary.replace(/\r?\n|\r/g, ' ').trim();
         if (orderSummary.length > 500) orderSummary = orderSummary.substring(0, 497) + '...';
 
-        // Ambil nama toko dari order_items
-        let mitraStoreName = '-';
-        try {
-            const orderItems = typeof order.order_items === 'string'
-                ? JSON.parse(order.order_items) : order.order_items;
-            if (Array.isArray(orderItems) && orderItems.length > 0) {
-                mitraStoreName = orderItems[0]?.name || orderItems[0]?.store?.title || '-';
-            }
-        } catch (e) { }
+        const driverPhoneDisplay = formatPhoneDisplay(confirmation.driver_phone);
 
         await sendWhatsAppTemplate(order.mitra_phone, CONFIG.templateMitraOrderNotify, {
-            "1": String(mitraStoreName),          // ← nama toko
+            "1": String(mitraStoreName),
             "2": String(orderId),
             "3": String(order.customer_name || '-'),
             "4": String(orderSummary),
-            "5": String(formatRupiah(totalPrice)),
+            "5": String(formatRupiah(mitraAmount)),  // ← harga produk ÷ divider
             "6": String(confirmation.driver_name || 'Driver'),
             "7": String(driverPhoneDisplay)
-            // hapus variabel komisi {{8}} dan {{9}}
         });
 
         console.log(`✅ Mitra notified: ${order.mitra_phone}`);
