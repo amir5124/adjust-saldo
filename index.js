@@ -1203,14 +1203,13 @@ async function sendOrderDetailsToDriver(orderId, confirmation) {
             const linkKeCustomer = `https://www.google.com/maps/dir/?api=1&origin=${originLat},${originLng}&destination=${destLat},${destLng}&travelmode=driving`;
 
             const routeMsg =
-                `RUTE PENGANTARAN\n\n` +
-                `1. Menuju Toko:\n` +
+                `🗺️ *RUTE PENGANTARAN*\n\n` +
+                `📍 *1. Menuju Toko:*\n` +
                 `${order.origin_address || 'Alamat toko'}\n` +
                 `${linkKeToko}\n\n` +
-                `2. Menuju Customer:\n` +
+                `🏠 *2. Menuju Customer:*\n` +
                 `${order.destination_address || 'Alamat customer'}\n` +
                 `${linkKeCustomer}`;
-
             await new Promise(r => setTimeout(r, 1000));
             await sendWhatsAppFreeForm(confirmation.driver_phone, routeMsg);
             console.log(`✅ Route links sent to driver`);
@@ -1393,26 +1392,18 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         await sendWhatsAppFreeForm(rawDriverPhone, `✅ Terima kasih! Pesanan *${matchedOrderId}* telah ditandai selesai.`);
 
         // Kirim template konfirmasi ke customer — hanya jika masih dalam jam operasional
-        if (isWithinOperationalHours()) {
-            const customerRawPhone = matchedPending.customer_phone.startsWith('+')
-                ? matchedPending.customer_phone
-                : `+${matchedPending.customer_phone}`;
-
-            try {
-                await sendWhatsAppTemplate(
-                    normalizePhoneNumber(matchedPending.customer_phone),
-                    CONFIG.templateCustomerOrderReceived,
-                    {
-                        "1": String(matchedPending.customer_name || 'Pelanggan'),
-                        "2": String(matchedOrderId)
-                    }
-                );
-                console.log(`✅ Customer confirmation template sent for order ${matchedOrderId}`);
-            } catch (err) {
-                console.error(`❌ Failed to send customer confirmation:`, err.message);
-            }
-        } else {
-            console.log(`⏰ Lewat jam operasional, skip kirim konfirmasi ke customer`);
+        try {
+            await sendWhatsAppTemplate(
+                normalizePhoneNumber(matchedPending.customer_phone),
+                CONFIG.templateCustomerOrderReceived,
+                {
+                    "1": String(matchedPending.customer_name || 'Pelanggan'),
+                    "2": String(matchedOrderId)
+                }
+            );
+            console.log(`✅ Customer confirmation template sent for order ${matchedOrderId}`);
+        } catch (err) {
+            console.error(`❌ Failed to send customer confirmation:`, err.message);
         }
 
         return res.sendStatus(200);
