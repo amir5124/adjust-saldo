@@ -44,7 +44,7 @@ const CONFIG = {
     twilioSid: process.env.TWILIO_ACCOUNT_SID || '',
     twilioAuth: process.env.TWILIO_AUTH_TOKEN || '',
     twilioWaNumber: process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886',
-    csNumber: process.env.CS_PHONE_NUMBER || '6282226666610',
+    csNumber: process.env.CS_PHONE_NUMBER || '082323907526',
 
     // Twilio Template SIDs
     templateDriverConfirmation: process.env.TWILIO_TEMPLATE_DRIVER_CONFIRMATION || 'HX0f899a4bc82aca9611ef757228c3ba61',
@@ -731,7 +731,7 @@ app.post('/callback', async (req, res) => {
 // ENDPOINT: GET /drivers (SSE for drivers)
 // ============================================================
 app.get('/drivers', async (req, res) => {
-    const HARDCODED_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjEzODE1NmI0Y2U1NGQxYmY2ZWRkNjllYmU5NjYxYzI3MmIxMjY4NDY5NDUzZjdhMjBjOWM0MWQ1ODNmODAzZjQwOGQ4MzdiN2Y2OGVjYTIzIn0.eyJhdWQiOiIxIiwianRpIjoiMTM4MTU2YjRjZTU0ZDFiZjZlZGQ2OWViZTk2NjFjMjcyYjEyNjg0Njk0NTNmN2EyMGM5YzQxZDU4M2Y4MDNmNDA4ZDgzN2I3ZjY4ZWNhMjMiLCJpYXQiOjE3ODA0OTE1NDEsIm5iZiI6MTc4MDQ5MTU0MSwiZXhwIjoxODEyMDI3NTQxLCJzdWIiOiIyOTcxODQ0Iiwic2NvcGVzIjpbXX0.V3nZisKH-lmfEmf0iqyRmadupFf8nVL5VbpxyBZ_Y7baoA2Q5yoposdHjmokbZqLEZ-a9dL0S2nINPNE9zxdjfU7tmY1Awz24Ii7mOkaQL8dz2680SY5S2raqiWiLn7vYNinTKiA2juWvKMFVvFkfH1PnKQQ_L7nGBW3ReQ0kQg4AbqAj5z1XcfDtuZ9NPLB0QupNsdIkSBz-bliNR3aX9YjL9pzv6aszKSzRYQZni2FT0URQKvPk9B0MXTpFDzKqjURlvkFrN-jpoiV6LSzBlIBuyR5rTf3seU9vPgGDLkDLX9sm7QO8vK7TKBl40TQjbmHT9KE7pQAM-JsPw5QyeJkSpXXNcRnpm1i0Pq8lrJUeAHlyE6j2iIsLoZKtUrQAI2rAdYUjwGFoo6N26c9rbZIEeibNUdSPco68oYY_BqKYoK4kGmzGCkUV1HrZopDhcrNfhDYZEiZtNgkNAiKRpjPXblMIeN7tGjORn29DXqxspGio2DhhNIEex-Ih3a5yaW39EgDVgWS2eDBTV0A6u3ZAJkxPctNkVkxehuxSCYVjnAv6dVjKcypzJQLmMXT77VAQ7hOrrd-_iO5cliCtkyoPjkVDYxEZ9bjAaFwkb7xVKdULFSwAyYzvKYas_-tG3mEvhcUynPRGVcJutfHULGYfYxJWkXdQovk7H-l7uo";
+    const HARDCODED_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjVjMjU2ZjNmNjdiMGY0YzM3M2RhYjYwYjNiYzkwN2ZmNzI2YjQyNWQ4NDQ1N2ViN2Q1YjU0ZDE1ZDUwNWUzZTI1YTQ4MDQxMjRjMDdhMTg4In0.eyJhdWQiOiIxIiwianRpIjoiNWMyNTZmM2Y2N2IwZjRjMzczZGFiNjBiM2JjOTA3ZmY3MjZiNDI1ZDg0NDU3ZWI3ZDViNTRkMTVkNTA1ZTNlMjVhNDgwNDEyNGMwN2ExODgiLCJpYXQiOjE3ODEwMDIyMjgsIm5iZiI6MTc4MTAwMjIyOCwiZXhwIjoxODEyNTM4MjI4LCJzdWIiOiIyOTcxODQ0Iiwic2NvcGVzIjpbXX0.kmhadkvBC9VkDT3I9qujCTKyTvIZhlLXNfN6hYhnOSym9kHzvGfG7cy-Mfk-EK6gnoOsTzEhf-yps46dfcm92E4lswqi18I_A5bJneNKObrR4sOpeVfQ-tWfjwc9oIjRnngP_ZNgrhkCTODS4TVaK7uSTeFRnJW9piFpjlMU9hGLfBmJ7zEd4jZn5MldpzNHBKyIS3i-W7kW4SZ4-KPfrKXstyQKPR_HFguEVxn_rLJwAWwwxwHaC9K3VHdr_iGqiX3sKr5qUr9QlhozyUemXBNn5XasphHKRWHVqRaDoMciP9mZ4LZ3Ovcg_J7v3KE1cIaKb6yNAgRoDiS8NClcFfkdiEufzPBKIRGvvTvZVjIISkMIG9GYlbcKSB8e3Tzzi5CukaH2jXAFiTcNbpSXESduMjq10HdEjaK93ii1mMj-zZLepZ8hc7Vs2DbEa69PAVEqoMs1MPKCOexxFznEefzN4mgpDE9sYr3DNrjbeIYPKZhReSEryfCp2xYBBfCwTrTilKtq01t-vlJWb7LTopIcleG1Eq63iIyLbvRwkojjdT9z7Fh-RYRi11Lkm2w5085BsS6e51s2eYIC07avSfraMbNV8A2XLfZYJpyWIuveskU2VHiuMq2ojWojVZqaaJgpobFQ8Fuq-14LPcPj6jgPvNiYdzu8t1KlQcay8UA";
 
     const { bearer_token, max_pages, page, unique_id, driver_status, detail = 'true' } = req.query;
     const finalToken = bearer_token || HARDCODED_TOKEN;
