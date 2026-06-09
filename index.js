@@ -297,7 +297,12 @@ async function processOrderSettlement(order) {
         return;
     }
 
-    const partnerCommission = parseFloat(order.partner_commission) || 0;
+    // ── Ubah partner_commission dari persen ke multiplier ────────────────
+    // Contoh: 10% → 1.10, 15% → 1.15, 20% → 1.20
+    const partnerCommissionPersen = parseFloat(order.partner_commission) || 0;
+    const partnerMultiplier = 1 + (partnerCommissionPersen / 100);  // 1.10 untuk 10%
+
+    console.log(`   partner_comm    : ${partnerCommissionPersen}% → multiplier ${partnerMultiplier}`);
 
     // ── Hitung ongkir dan harga barang dari order_items ──────────────────
     let totalOngkir = 0;
@@ -331,10 +336,11 @@ async function processOrderSettlement(order) {
         totalOngkir = parseInt(order.service_fee) || 0;
     }
 
-    // ── Hitung bagian MITRA ──────────────────────────────────────────────
-    // Mitra dapat = harga_produk - (harga_produk × partner_commission%)
-    const potonganMitra = Math.round(totalHargaBarang * (partnerCommission / 100));
-    const mitraAmount = totalHargaBarang - potonganMitra;
+    // ── Hitung bagian MITRA dengan MULTIPLIER ─────────────────────────────
+    // Mitra dapat = harga_produk × partner_multiplier
+    // Contoh: 100.000 × 1.10 = 110.000 (mitra untung 10% dari harga produk)
+    const mitraAmount = Math.round(totalHargaBarang * partnerMultiplier);
+    const potonganMitra = mitraAmount - totalHargaBarang;  // Selisihnya adalah komisi
 
     // ── Hitung bagian DRIVER ─────────────────────────────────────────────
     // Driver dapat = ongkir - (ongkir × 8%)
@@ -344,7 +350,7 @@ async function processOrderSettlement(order) {
     // ── Log ringkasan ────────────────────────────────────────────────────
     console.log(`   payment_method  : ${order.payment_method || '-'}`);
     console.log(`   harga_barang    : Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
-    console.log(`   partner_comm    : ${partnerCommission}%`);
+    console.log(`   partner_comm    : ${partnerCommissionPersen}% (×${partnerMultiplier})`);
     console.log(`   potongan_mitra  : Rp ${potonganMitra.toLocaleString('id-ID')}`);
     console.log(`   MITRA DAPAT     : Rp ${mitraAmount.toLocaleString('id-ID')}`);
     console.log(`   ongkir          : Rp ${totalOngkir.toLocaleString('id-ID')}`);
@@ -353,7 +359,7 @@ async function processOrderSettlement(order) {
 
     // ── Adjust saldo MITRA ───────────────────────────────────────────────
     if (order.mitra_phone && mitraAmount > 0) {
-        const mitraNote = `Komisi order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} - ${partnerCommission}% = ${formatRupiah(mitraAmount)}`;
+        const mitraNote = `Komisi order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} × ${partnerMultiplier} = ${formatRupiah(mitraAmount)}`;
         const mitraResult = await adjustBalanceByPhone(
             formatPhoneDisplay(order.mitra_phone),
             mitraAmount,
@@ -1440,7 +1446,7 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         const order = rows[0];
         console.log(`✅ Found order: ${order.order_id} for settlement`);
 
-        await sendWhatsAppFreeForm(rawDriverPhone, `Terima kasih! Pesanan *${order.order_id}* telah dikonfirmasi. Saldo sedang diproses.`);
+        await sendWhatsAppFreeForm(rawDriverPhone, `Terima kasih! Pesanan *${order.order_id}* telah dikonfirmasi sebagai selesai.`);
 
         try {
             await processOrderSettlement(order);
