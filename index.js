@@ -286,25 +286,28 @@ async function adjustBalanceByPhone(phone, amount, note) {
 // ============================================================
 async function processOrderSettlement(order) {
     const orderId = order.order_id;
+    console.log(`\n💰 [SETTLEMENT] Processing: ${orderId}`);
 
-    const [check] = await pool.execute(`SELECT order_status FROM orders WHERE order_id = ?`, [orderId]);
+    // Cegah double settlement
+    const [check] = await pool.execute(
+        `SELECT order_status FROM orders WHERE order_id = ?`, [orderId]
+    );
     if (check[0]?.order_status === 'COMPLETED') {
-        console.log(`⚠️ Already completed: ${orderId}`);
+        console.log(`⚠️ [SETTLEMENT] Already completed, skip: ${orderId}`);
         return;
     }
 
-    const totalPrice = parseInt(order.total_price) || 0;
-    const paymentMethod = (order.payment_method || '').toUpperCase();
     const partnerCommission = parseFloat(order.partner_commission) || 0;
-    const isQris = paymentMethod === 'QRIS';
 
+    // ── Hitung ongkir dan harga barang dari order_items ──────────────────
     let totalOngkir = 0;
     let totalHargaBarang = 0;
 
     if (order.order_items) {
         try {
             const orderItems = typeof order.order_items === 'string'
-                ? JSON.parse(order.order_items) : order.order_items;
+                ? JSON.parse(order.order_items)
+                : order.order_items;
 
             if (Array.isArray(orderItems) && orderItems.length > 0) {
                 for (const store of orderItems) {
@@ -321,71 +324,60 @@ async function processOrderSettlement(order) {
         }
     }
 
-    // Fallback kalau order_items kosong
+    // Fallback ke kolom DB kalau order_items kosong/gagal parse
     if (totalOngkir === 0 && totalHargaBarang === 0) {
-        totalOngkir = parseInt(order.service_fee) || 0;
+        console.warn(`⚠️ [SETTLEMENT] Fallback ke base_price & service_fee`);
         totalHargaBarang = parseInt(order.base_price) || 0;
+        totalOngkir = parseInt(order.service_fee) || 0;
     }
 
-    const komisiBarangBruto = Math.round(totalHargaBarang * (partnerCommission / 100));
+    // ── Hitung bagian MITRA ──────────────────────────────────────────────
+    // Mitra dapat = harga_produk - (harga_produk × partner_commission%)
+    const potonganMitra = Math.round(totalHargaBarang * (partnerCommission / 100));
+    const mitraAmount = totalHargaBarang - potonganMitra;
 
-    // ✅ FIX: Admin fee PROPORSIONAL, tidak flat kalau komisi lebih kecil dari 2500
-    let mitraAmount = 0;
-    let driverAmount = 0;
+    // ── Hitung bagian DRIVER ─────────────────────────────────────────────
+    // Driver dapat = ongkir - (ongkir × 8%)
+    const potonganDriver = Math.round(totalOngkir * 0.08);
+    const driverAmount = totalOngkir - potonganDriver;
 
-    if (isQris) {
-        mitraAmount = komisiBarangBruto - Math.round(komisiBarangBruto * 0.008);
-        const ongkirAfterKomisi = Math.round(totalOngkir * 0.92);
-        driverAmount = ongkirAfterKomisi - Math.round(ongkirAfterKomisi * 0.008);
-    } else {
-        // ✅ Admin fee flat 2500 HANYA dipotong kalau komisi >= 2500
-        // Kalau komisi kecil, pakai admin fee proporsional 0.8% saja
-        if (komisiBarangBruto >= 2500) {
-            mitraAmount = komisiBarangBruto - 2500;
-        } else if (komisiBarangBruto > 0) {
-            // Komisi ada tapi kecil — potong admin proporsional 8%
-            mitraAmount = Math.round(komisiBarangBruto * 0.92);
-        } else {
-            mitraAmount = 0;
-        }
+    // ── Log ringkasan ────────────────────────────────────────────────────
+    console.log(`   payment_method  : ${order.payment_method || '-'}`);
+    console.log(`   harga_barang    : Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
+    console.log(`   partner_comm    : ${partnerCommission}%`);
+    console.log(`   potongan_mitra  : Rp ${potonganMitra.toLocaleString('id-ID')}`);
+    console.log(`   MITRA DAPAT     : Rp ${mitraAmount.toLocaleString('id-ID')}`);
+    console.log(`   ongkir          : Rp ${totalOngkir.toLocaleString('id-ID')}`);
+    console.log(`   potongan_driver : Rp ${potonganDriver.toLocaleString('id-ID')} (8%)`);
+    console.log(`   DRIVER DAPAT    : Rp ${driverAmount.toLocaleString('id-ID')}`);
 
-        const ongkirAfterKomisi = Math.round(totalOngkir * 0.92);
-        driverAmount = Math.max(0, ongkirAfterKomisi - 2500);
-    }
-
-    console.log(`   totalOngkir     : Rp ${totalOngkir.toLocaleString('id-ID')}`);
-    console.log(`   totalHargaBarang: Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
-    console.log(`   komisi_bruto    : Rp ${komisiBarangBruto.toLocaleString('id-ID')}`);
-    console.log(`   mitra_dapat     : Rp ${mitraAmount.toLocaleString('id-ID')}`);
-    console.log(`   driver_dapat    : Rp ${driverAmount.toLocaleString('id-ID')}`);
-
-    // Adjust saldo MITRA
+    // ── Adjust saldo MITRA ───────────────────────────────────────────────
     if (order.mitra_phone && mitraAmount > 0) {
-        const mitraNote = `Komisi order ${orderId} | ${formatRupiah(totalHargaBarang)} x ${partnerCommission}% = ${formatRupiah(komisiBarangBruto)} - admin = ${formatRupiah(mitraAmount)}`;
+        const mitraNote = `Komisi order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} - ${partnerCommission}% = ${formatRupiah(mitraAmount)}`;
         const mitraResult = await adjustBalanceByPhone(
-            formatPhoneDisplay(order.mitra_phone),  // 08xxx → sudah benar
+            formatPhoneDisplay(order.mitra_phone),
             mitraAmount,
             mitraNote
         );
-        console.log(`✅ Mitra [${formatPhoneDisplay(order.mitra_phone)}]: ${mitraResult.success ? 'OK' : mitraResult.error}`);
+        console.log(`✅ Mitra [${formatPhoneDisplay(order.mitra_phone)}]: ${mitraResult.success ? 'OK' : '❌ ' + mitraResult.error}`);
     } else {
         console.warn(`⚠️ Skip mitra: phone=${order.mitra_phone}, amount=${mitraAmount}`);
     }
 
-    // Adjust saldo DRIVER
+    // ── Adjust saldo DRIVER ──────────────────────────────────────────────
     if (order.driver_phone && driverAmount > 0) {
-        const driverNote = `Ongkir order ${orderId} | ${formatRupiah(totalOngkir)} - 8% - admin = ${formatRupiah(driverAmount)}`;
+        const driverNote = `Ongkir order ${orderId} | Ongkir ${formatRupiah(totalOngkir)} - 8% = ${formatRupiah(driverAmount)}`;
         const driverResult = await adjustBalanceByPhone(
-            formatPhoneDisplay(order.driver_phone),  // 62xxx → jadi 08xxx ✅
+            formatPhoneDisplay(order.driver_phone),
             driverAmount,
             driverNote
         );
-        console.log(`✅ Driver [${formatPhoneDisplay(order.driver_phone)}]: ${driverResult.success ? 'OK' : driverResult.error}`);
+        console.log(`✅ Driver [${formatPhoneDisplay(order.driver_phone)}]: ${driverResult.success ? 'OK' : '❌ ' + driverResult.error}`);
     } else {
         console.warn(`⚠️ Skip driver: phone=${order.driver_phone}, amount=${driverAmount}`);
     }
 
-    // Update COMPLETED
+    // ── Update status COMPLETED ──────────────────────────────────────────
     await pool.execute(
         `UPDATE orders SET order_status = 'COMPLETED', updated_at = NOW() WHERE order_id = ?`,
         [orderId]
