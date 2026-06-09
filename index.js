@@ -286,14 +286,10 @@ async function adjustBalanceByPhone(phone, amount, note) {
 // ============================================================
 async function processOrderSettlement(order) {
     const orderId = order.order_id;
-    console.log(`\n💰 [SETTLEMENT] Processing: ${orderId}`);
 
-    // Cegah double settlement
-    const [check] = await pool.execute(
-        `SELECT order_status FROM orders WHERE order_id = ?`, [orderId]
-    );
+    const [check] = await pool.execute(`SELECT order_status FROM orders WHERE order_id = ?`, [orderId]);
     if (check[0]?.order_status === 'COMPLETED') {
-        console.log(`⚠️ [SETTLEMENT] Already completed, skip: ${orderId}`);
+        console.log(`⚠️ Already completed: ${orderId}`);
         return;
     }
 
@@ -302,11 +298,6 @@ async function processOrderSettlement(order) {
     const partnerCommission = parseFloat(order.partner_commission) || 0;
     const isQris = paymentMethod === 'QRIS';
 
-    // Biaya admin
-    const adminFeeRate = isQris ? 0.008 : 0;
-    const adminFeeFlat = isQris ? 0 : 2500;
-
-    // Hitung ongkir dan harga barang dari order_items
     let totalOngkir = 0;
     let totalHargaBarang = 0;
 
@@ -315,12 +306,11 @@ async function processOrderSettlement(order) {
             const orderItems = typeof order.order_items === 'string'
                 ? JSON.parse(order.order_items) : order.order_items;
 
-            if (Array.isArray(orderItems)) {
+            if (Array.isArray(orderItems) && orderItems.length > 0) {
                 for (const store of orderItems) {
                     const distance = parseFloat(store.distance || store.store?.distance || 0);
                     const ongkir = store.ongkir || (distance <= 3 ? 9500 : 9500 + Math.round((distance - 3) * 3500));
                     totalOngkir += ongkir;
-
                     for (const item of store.items || []) {
                         totalHargaBarang += (item.price || 0) * (item.qty || 1);
                     }
@@ -328,75 +318,80 @@ async function processOrderSettlement(order) {
             }
         } catch (e) {
             console.error('❌ Parse order_items error:', e.message);
-            totalOngkir = parseInt(order.service_fee) || 0;
-            totalHargaBarang = parseInt(order.base_price) || 0;
         }
     }
 
-    // ── Hitung bagian MITRA ──────────────────────────────────
-    // QRIS: Produk - partner_commission% - 0.8%
-    // VA  : Produk - partner_commission% - 2500
+    // Fallback kalau order_items kosong
+    if (totalOngkir === 0 && totalHargaBarang === 0) {
+        totalOngkir = parseInt(order.service_fee) || 0;
+        totalHargaBarang = parseInt(order.base_price) || 0;
+    }
+
     const komisiBarangBruto = Math.round(totalHargaBarang * (partnerCommission / 100));
+
+    // ✅ FIX: Admin fee PROPORSIONAL, tidak flat kalau komisi lebih kecil dari 2500
     let mitraAmount = 0;
-    if (isQris) {
-        mitraAmount = komisiBarangBruto - Math.round(komisiBarangBruto * adminFeeRate);
-    } else {
-        mitraAmount = Math.max(0, komisiBarangBruto - adminFeeFlat);
-    }
-
-    // ── Hitung bagian DRIVER ─────────────────────────────────
-    // QRIS: Ongkir - 8% - 0.8%
-    // VA  : Ongkir - 8% - 2500
-    const ongkirAfterKomisi = Math.round(totalOngkir * (1 - 0.08)); // Ongkir - 8%
     let driverAmount = 0;
+
     if (isQris) {
-        driverAmount = ongkirAfterKomisi - Math.round(ongkirAfterKomisi * adminFeeRate);
+        mitraAmount = komisiBarangBruto - Math.round(komisiBarangBruto * 0.008);
+        const ongkirAfterKomisi = Math.round(totalOngkir * 0.92);
+        driverAmount = ongkirAfterKomisi - Math.round(ongkirAfterKomisi * 0.008);
     } else {
-        driverAmount = Math.max(0, ongkirAfterKomisi - adminFeeFlat);
+        // ✅ Admin fee flat 2500 HANYA dipotong kalau komisi >= 2500
+        // Kalau komisi kecil, pakai admin fee proporsional 0.8% saja
+        if (komisiBarangBruto >= 2500) {
+            mitraAmount = komisiBarangBruto - 2500;
+        } else if (komisiBarangBruto > 0) {
+            // Komisi ada tapi kecil — potong admin proporsional 8%
+            mitraAmount = Math.round(komisiBarangBruto * 0.92);
+        } else {
+            mitraAmount = 0;
+        }
+
+        const ongkirAfterKomisi = Math.round(totalOngkir * 0.92);
+        driverAmount = Math.max(0, ongkirAfterKomisi - 2500);
     }
 
-    console.log(`   Payment    : ${paymentMethod}`);
-    console.log(`   Ongkir     : Rp ${totalOngkir.toLocaleString('id-ID')}`);
-    console.log(`   Harga barang: Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
-    console.log(`   Komisi mitra (bruto): Rp ${komisiBarangBruto.toLocaleString('id-ID')} (${partnerCommission}%)`);
-    console.log(`   Mitra dapat : Rp ${mitraAmount.toLocaleString('id-ID')}`);
-    console.log(`   Ongkir-8%  : Rp ${ongkirAfterKomisi.toLocaleString('id-ID')}`);
-    console.log(`   Driver dapat: Rp ${driverAmount.toLocaleString('id-ID')}`);
+    console.log(`   totalOngkir     : Rp ${totalOngkir.toLocaleString('id-ID')}`);
+    console.log(`   totalHargaBarang: Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
+    console.log(`   komisi_bruto    : Rp ${komisiBarangBruto.toLocaleString('id-ID')}`);
+    console.log(`   mitra_dapat     : Rp ${mitraAmount.toLocaleString('id-ID')}`);
+    console.log(`   driver_dapat    : Rp ${driverAmount.toLocaleString('id-ID')}`);
 
-    // ── Adjust saldo MITRA ───────────────────────────────────
+    // Adjust saldo MITRA
     if (order.mitra_phone && mitraAmount > 0) {
-        const mitraNote = `Komisi order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} x ${partnerCommission}% = ${formatRupiah(komisiBarangBruto)} - admin = ${formatRupiah(mitraAmount)}`;
+        const mitraNote = `Komisi order ${orderId} | ${formatRupiah(totalHargaBarang)} x ${partnerCommission}% = ${formatRupiah(komisiBarangBruto)} - admin = ${formatRupiah(mitraAmount)}`;
         const mitraResult = await adjustBalanceByPhone(
-            formatPhoneDisplay(order.mitra_phone),
+            formatPhoneDisplay(order.mitra_phone),  // 08xxx → sudah benar
             mitraAmount,
             mitraNote
         );
-        console.log(`✅ Mitra saldo: ${mitraResult.success ? 'OK' : mitraResult.error}`);
+        console.log(`✅ Mitra [${formatPhoneDisplay(order.mitra_phone)}]: ${mitraResult.success ? 'OK' : mitraResult.error}`);
     } else {
         console.warn(`⚠️ Skip mitra: phone=${order.mitra_phone}, amount=${mitraAmount}`);
     }
 
-    // ── Adjust saldo DRIVER ──────────────────────────────────
+    // Adjust saldo DRIVER
     if (order.driver_phone && driverAmount > 0) {
-        const driverNote = `Pendapatan order ${orderId} | Ongkir ${formatRupiah(totalOngkir)} - 8% - admin = ${formatRupiah(driverAmount)}`;
+        const driverNote = `Ongkir order ${orderId} | ${formatRupiah(totalOngkir)} - 8% - admin = ${formatRupiah(driverAmount)}`;
         const driverResult = await adjustBalanceByPhone(
-            formatPhoneDisplay(order.driver_phone),
+            formatPhoneDisplay(order.driver_phone),  // 62xxx → jadi 08xxx ✅
             driverAmount,
             driverNote
         );
-        console.log(`✅ Driver saldo: ${driverResult.success ? 'OK' : driverResult.error}`);
+        console.log(`✅ Driver [${formatPhoneDisplay(order.driver_phone)}]: ${driverResult.success ? 'OK' : driverResult.error}`);
     } else {
         console.warn(`⚠️ Skip driver: phone=${order.driver_phone}, amount=${driverAmount}`);
     }
 
-    // ── Update status COMPLETED ──────────────────────────────
+    // Update COMPLETED
     await pool.execute(
         `UPDATE orders SET order_status = 'COMPLETED', updated_at = NOW() WHERE order_id = ?`,
         [orderId]
     );
-    console.log(`✅ [SETTLEMENT] Done: ${orderId}`);
+    console.log(`✅ [SETTLEMENT] COMPLETED: ${orderId}`);
 }
-
 // ============================================================
 // TWILIO SEND FUNCTIONS
 // ============================================================
@@ -1426,26 +1421,44 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     }
 
     // ── HANDLE: Customer klik "SUDAH TERIMA" ──────────────────────────────
+    // ============================================================
+    // WEBHOOK WHATSAPP — handler SUDAH_TERIMA (FIXED)
+    // ============================================================
+
     if (message === 'SUDAH_TERIMA' || message === 'ORDER_RECEIVED') {
+
+        // Ambil 8 digit terakhir — paling toleran terhadap perbedaan format
+        const phoneSuffix = driverPhone.replace(/\D/g, '').slice(-10);
+
         const [rows] = await pool.execute(
-            `SELECT * FROM orders WHERE customer_phone LIKE ? AND order_status = 'DELIVERED' ORDER BY updated_at DESC LIMIT 1`,
-            [`%${driverPhone.replace('+', '')}%`]
+            `SELECT * FROM orders 
+             WHERE customer_phone LIKE ? 
+             AND order_status = 'DELIVERED' 
+             ORDER BY updated_at DESC 
+             LIMIT 1`,
+            [`%${phoneSuffix}%`]
         );
 
         if (rows.length === 0) {
-            console.warn(`⚠️ No delivered order found for customer ${driverPhone}`);
+            console.warn(`⚠️ No delivered order for customer ${driverPhone} (suffix: ${phoneSuffix})`);
+            await sendWhatsAppFreeForm(rawDriverPhone, '⚠️ Pesanan tidak ditemukan atau belum berstatus DELIVERED.');
             return res.sendStatus(200);
         }
 
         const order = rows[0];
+        console.log(`✅ Found order: ${order.order_id} for settlement`);
 
-        await sendWhatsAppFreeForm(rawDriverPhone, `Terima kasih sudah mengkonfirmasi! Pesanan ${order.order_id} telah selesai.`);
+        await sendWhatsAppFreeForm(rawDriverPhone, `Terima kasih! Pesanan *${order.order_id}* telah dikonfirmasi. Saldo sedang diproses.`);
 
-        // Settlement dipanggil — update COMPLETED + adjust saldo driver & mitra
-        await processOrderSettlement(order);
+        try {
+            await processOrderSettlement(order);
+        } catch (err) {
+            console.error(`❌ Settlement FAILED:`, err.message);
+        }
 
         return res.sendStatus(200);
     }
+
 
     // ── HANDLE: Accept / Reject driver (kode lama) ─────────────────────────
     let foundOrderId = null;
@@ -1647,6 +1660,20 @@ app.get('/debug/template/:sid', async (req, res) => {
             types: template.types,
             variables: template.variables
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Endpoint manual settle — hapus setelah dipakai
+app.post('/debug/manual-settle/:order_id', async (req, res) => {
+    const { order_id } = req.params;
+    const [rows] = await pool.execute('SELECT * FROM orders WHERE order_id = ?', [order_id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+
+    try {
+        await processOrderSettlement(rows[0]);
+        res.json({ success: true, order_id });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
