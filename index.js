@@ -252,20 +252,31 @@ async function addBalanceToAmir(amount, customerName, methodCode, serialNumber) 
 
 // Adjust saldo by phone number
 async function adjustBalanceByPhone(phone, amount, note) {
-    console.log(`💰 [ADJUST-BALANCE] phone: ${phone} | amount: ${amount} | note: ${note}`);
+    console.log(`💰 [ADJUST-BALANCE] phone: ${phone} | amount: ${amount}`);
     try {
         const response = await axios.post(`${CONFIG.jagelBaseUrl}/balance/adjust`, {
-            action: 'adjust_balance',
             type: 'phone',
             value: phone,
             amount: amount,
             note: note,
             apikey: CONFIG.jagelApiKey
-        }, { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
-        console.log(`✅ Balance adjusted:`, response.data);
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'  // ← tambahkan ini
+            },
+            timeout: 30000
+        });
+        console.log(`✅ Balance adjusted:`, JSON.stringify(response.data));
         return { success: true, data: response.data };
     } catch (err) {
+        // ← Ini yang paling penting untuk debug
         console.error(`❌ Adjust balance failed:`, err.message);
+        console.error(`❌ Response status:`, err.response?.status);
+        console.error(`❌ Response data:`, JSON.stringify(err.response?.data));
+        console.error(`❌ Request payload:`, JSON.stringify({
+            type: 'phone', value: phone, amount, apikey: CONFIG.jagelApiKey
+        }));
         return { success: false, error: err.message };
     }
 }
