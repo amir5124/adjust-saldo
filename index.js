@@ -297,12 +297,12 @@ async function processOrderSettlement(order) {
         return;
     }
 
-    // ── Ubah partner_commission dari persen ke multiplier ────────────────
+    // ── Ubah partner_commission dari persen ke pembagi ────────────────────
     // Contoh: 10% → 1.10, 15% → 1.15, 20% → 1.20
     const partnerCommissionPersen = parseFloat(order.partner_commission) || 0;
-    const partnerMultiplier = 1 + (partnerCommissionPersen / 100);  // 1.10 untuk 10%
+    const partnerDivider = 1 + (partnerCommissionPersen / 100);  // 1.10 untuk 10%
 
-    console.log(`   partner_comm    : ${partnerCommissionPersen}% → multiplier ${partnerMultiplier}`);
+    console.log(`   partner_comm    : ${partnerCommissionPersen}% → divider ${partnerDivider}`);
 
     // ── Hitung ongkir dan harga barang dari order_items ──────────────────
     let totalOngkir = 0;
@@ -336,11 +336,11 @@ async function processOrderSettlement(order) {
         totalOngkir = parseInt(order.service_fee) || 0;
     }
 
-    // ── Hitung bagian MITRA dengan MULTIPLIER ─────────────────────────────
-    // Mitra dapat = harga_produk × partner_multiplier
-    // Contoh: 100.000 × 1.10 = 110.000 (mitra untung 10% dari harga produk)
-    const mitraAmount = Math.round(totalHargaBarang * partnerMultiplier);
-    const potonganMitra = mitraAmount - totalHargaBarang;  // Selisihnya adalah komisi
+    // ── Hitung bagian MITRA dengan PEMBAGI ────────────────────────────────
+    // Mitra dapat = harga_produk ÷ (1 + partner_commission%)
+    // Contoh: 100.000 ÷ 1,10 = 90.909 (mitra dapat setelah dipotong 10%)
+    const mitraAmount = Math.round(totalHargaBarang / partnerDivider);
+    const potonganMitra = totalHargaBarang - mitraAmount;
 
     // ── Hitung bagian DRIVER ─────────────────────────────────────────────
     // Driver dapat = ongkir - (ongkir × 8%)
@@ -350,16 +350,16 @@ async function processOrderSettlement(order) {
     // ── Log ringkasan ────────────────────────────────────────────────────
     console.log(`   payment_method  : ${order.payment_method || '-'}`);
     console.log(`   harga_barang    : Rp ${totalHargaBarang.toLocaleString('id-ID')}`);
-    console.log(`   partner_comm    : ${partnerCommissionPersen}% (×${partnerMultiplier})`);
-    console.log(`   potongan_mitra  : Rp ${potonganMitra.toLocaleString('id-ID')}`);
+    console.log(`   partner_comm    : ${partnerCommissionPersen}% (÷${partnerDivider})`);
     console.log(`   MITRA DAPAT     : Rp ${mitraAmount.toLocaleString('id-ID')}`);
+    console.log(`   potongan_mitra  : Rp ${potonganMitra.toLocaleString('id-ID')}`);
     console.log(`   ongkir          : Rp ${totalOngkir.toLocaleString('id-ID')}`);
     console.log(`   potongan_driver : Rp ${potonganDriver.toLocaleString('id-ID')} (8%)`);
     console.log(`   DRIVER DAPAT    : Rp ${driverAmount.toLocaleString('id-ID')}`);
 
     // ── Adjust saldo MITRA ───────────────────────────────────────────────
     if (order.mitra_phone && mitraAmount > 0) {
-        const mitraNote = `Komisi order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} × ${partnerMultiplier} = ${formatRupiah(mitraAmount)}`;
+        const mitraNote = `Harga order ${orderId} | Produk ${formatRupiah(totalHargaBarang)} ÷ ${partnerDivider} = ${formatRupiah(mitraAmount)}`;
         const mitraResult = await adjustBalanceByPhone(
             formatPhoneDisplay(order.mitra_phone),
             mitraAmount,
