@@ -1548,6 +1548,25 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
         storesDetailText = storesDetailText.replace(/\r?\n|\r/g, ' ').trim();
         if (storesDetailText.length > 1500) storesDetailText = storesDetailText.substring(0, 1497) + '...';
 
+        // ✅ TAMBAHAN: Format Tanggal & Waktu WITA (UTC+8)
+        const now = new Date();
+        const witaOffset = 8 * 60 * 60 * 1000;
+        const witaTime = new Date(now.getTime() + witaOffset);
+
+        const hariList = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+        const bulanList = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+            'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+        const hariNama = hariList[witaTime.getUTCDay()];
+        const tanggal = witaTime.getUTCDate();
+        const bulanNama = bulanList[witaTime.getUTCMonth()];
+        const tahun = witaTime.getUTCFullYear();
+        const jam = String(witaTime.getUTCHours()).padStart(2, '0');
+        const menit = String(witaTime.getUTCMinutes()).padStart(2, '0');
+
+        const tanggalFormatted = `${hariNama}, ${tanggal} ${bulanNama} ${tahun}`;   // "Rabu, 10 Juni 2026"
+        const waktuFormatted = `${jam}:${menit} WITA`;                            // "14:35 WITA"
+
         const driverPhoneDisplay = formatPhoneDisplay(confirmation.driver_phone);
 
         const variables = {
@@ -1556,10 +1575,14 @@ async function notifyCustomerOrderAccepted(orderId, confirmation) {
             "3": String(driverPhoneDisplay),
             "4": String(orderId),
             "5": String(storesDetailText),
-            "6": String(formatRupiah(order.total_price))
+            "6": String(formatRupiah(order.total_price)),
+            "7": String(tanggalFormatted),   // 📅 Tanggal
+            "8": String(waktuFormatted)      // ⏰ Waktu
         };
 
         console.log(`📤 [CUSTOMER] Variables["5"] =`, variables["5"]);
+        console.log(`📤 [CUSTOMER] Variables["7"] =`, variables["7"]);
+        console.log(`📤 [CUSTOMER] Variables["8"] =`, variables["8"]);
 
         await sendWhatsAppTemplate(order.customer_phone, CONFIG.templateCustomerOrderConfirmed, variables);
         console.log(`✅ Customer notified`);
