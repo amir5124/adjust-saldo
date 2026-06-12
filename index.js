@@ -29,14 +29,19 @@ app.use(express.urlencoded({ extended: true }));
 
 
 const CONFIG = {
-    clientId: process.env.LINKQU_CLIENT_ID || '5f5aa496-7e16-4ca1-9967-33c768dac6c7',
-    clientSecret: process.env.LINKQU_CLIENT_SECRET || 'TM1rVhfaFm5YJxKruHo0nWMWC',
-    username: process.env.LINKQU_USERNAME || 'LI9019VKS',
-    pin: process.env.LINKQU_PIN || '5m6uYAScSxQtCmU',
-    serverKey: process.env.LINKQU_SERVER_KEY || 'QtwGEr997XDcmMb1Pq8S5X1N',
+    // clientId: process.env.LINKQU_CLIENT_ID || '5f5aa496-7e16-4ca1-9967-33c768dac6c7',
+    // clientSecret: process.env.LINKQU_CLIENT_SECRET || 'TM1rVhfaFm5YJxKruHo0nWMWC',
+    // username: process.env.LINKQU_USERNAME || 'LI9019VKS',
+    // pin: process.env.LINKQU_PIN || '5m6uYAScSxQtCmU',
+    // serverKey: process.env.LINKQU_SERVER_KEY || 'QtwGEr997XDcmMb1Pq8S5X1N',
+    clientId: process.env.LINKQU_CLIENT_ID || 'testing',
+    clientSecret: process.env.LINKQU_CLIENT_SECRET || '123',
+    username: process.env.LINKQU_USERNAME || 'LI307GXIN',
+    pin: process.env.LINKQU_PIN || '2K2NPCBBNNTovgB',
+    serverKey: process.env.LINKQU_SERVER_KEY || 'LinkQu@2020',
     callbackUrl: process.env.CALLBACK_URL || 'https://jagel.siappgo.id/callback',
     jagelApiKey: process.env.JAGEL_APIKEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO',
-    linkquGateway: process.env.LINKQU_GATEWAY || 'https://api.linkqu.id/linkqu-partner',
+    linkquGateway: process.env.LINKQU_GATEWAY || 'https://gateway-dev.linkqu.id/linkqu-partner',
     jagelBaseUrl: process.env.JAGEL_BASE_URL || 'https://api.jagel.id/v1',
     port: parseInt(process.env.PORT || '3000'),
 
