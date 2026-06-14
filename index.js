@@ -1436,10 +1436,14 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     // ============================================================
 
     if (message === 'SUDAH_TERIMA' || message === 'ORDER_RECEIVED') {
+        // ✅ Perbaikan: Gunakan nomor pengirim (customer) bukan driver
+        const rawCustomerPhone = fromNumber.replace('whatsapp:', '');
+        const customerPhone = normalizePhoneNumber(rawCustomerPhone);
+        const phoneSuffix = customerPhone.replace(/\D/g, '').slice(-10);
 
-        // Ambil 8 digit terakhir — paling toleran terhadap perbedaan format
-        const phoneSuffix = driverPhone.replace(/\D/g, '').slice(-10);
+        console.log(`📱 Customer confirmation from: ${customerPhone}`);
 
+        // ✅ Cari order dengan status DELIVERED milik customer ini
         const [rows] = await pool.execute(
             `SELECT * FROM orders 
              WHERE customer_phone LIKE ? 
@@ -1450,18 +1454,37 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         );
 
         if (rows.length === 0) {
-            console.warn(`⚠️ No delivered order for customer ${driverPhone} (suffix: ${phoneSuffix})`);
-            await sendWhatsAppFreeForm(rawDriverPhone, '⚠️ Pesanan tidak ditemukan atau belum berstatus DELIVERED.');
+            console.warn(`⚠️ No delivered order for customer ${customerPhone}`);
+            await sendWhatsAppFreeForm(rawCustomerPhone, '⚠️ Tidak ada pesanan dengan status DELIVERED.');
             return res.sendStatus(200);
         }
 
         const order = rows[0];
-        console.log(`✅ Found order: ${order.order_id} for settlement`);
+        console.log(`✅ Found order: ${order.order_id} for final settlement`);
 
-        await sendWhatsAppFreeForm(rawDriverPhone, `Terima kasih! Pesanan *${order.order_id}* telah dikonfirmasi sebagai selesai.`);
+        // ✅ 1. Kirim konfirmasi ke customer
+        await sendWhatsAppFreeForm(rawCustomerPhone,
+            `✅ Terima kasih! Pesanan *${order.order_id}* telah dikonfirmasi selesai.`
+        );
 
+        // ✅ 2. Kirim notifikasi ke driver bahwa customer sudah konfirmasi
+        if (order.driver_phone) {
+            await sendWhatsAppTemplate(
+                order.driver_phone,
+                CONFIG.templateDriverOrderComplete, // atau template lain
+                {
+                    "1": String(order.driver_name || 'Driver'),
+                    "2": String(order.order_id),
+                    "3": "Customer telah mengkonfirmasi pesanan selesai"
+                }
+            );
+            console.log(`✅ Driver notified of customer confirmation`);
+        }
+
+        // ✅ 3. LANGSUNG proses settlement (status sudah DELIVERED dari driver sebelumnya)
         try {
             await processOrderSettlement(order);
+            console.log(`✅ Settlement completed for order ${order.order_id}`);
         } catch (err) {
             console.error(`❌ Settlement FAILED:`, err.message);
         }
