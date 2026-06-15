@@ -1436,14 +1436,12 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     // ============================================================
 
     if (message === 'SUDAH_TERIMA' || message === 'ORDER_RECEIVED') {
-        // ✅ Perbaikan: Gunakan nomor pengirim (customer) bukan driver
         const rawCustomerPhone = fromNumber.replace('whatsapp:', '');
         const customerPhone = normalizePhoneNumber(rawCustomerPhone);
         const phoneSuffix = customerPhone.replace(/\D/g, '').slice(-10);
 
         console.log(`📱 Customer confirmation from: ${customerPhone}`);
 
-        // ✅ Cari order dengan status DELIVERED milik customer ini
         const [rows] = await pool.execute(
             `SELECT * FROM orders 
              WHERE customer_phone LIKE ? 
@@ -1462,26 +1460,32 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
         const order = rows[0];
         console.log(`✅ Found order: ${order.order_id} for final settlement`);
 
-        // ✅ 1. Kirim konfirmasi ke customer
-        await sendWhatsAppFreeForm(rawCustomerPhone,
-            `✅ Terima kasih! Pesanan *${order.order_id}* telah dikonfirmasi selesai.`
-        );
-
-        // ✅ 2. Kirim notifikasi ke driver bahwa customer sudah konfirmasi
-        if (order.driver_phone) {
-            await sendWhatsAppTemplate(
-                order.driver_phone,
-                CONFIG.templateDriverOrderComplete, // atau template lain
-                {
-                    "1": String(order.driver_name || 'Driver'),
-                    "2": String(order.order_id),
-                    "3": "Customer telah mengkonfirmasi pesanan selesai"
-                }
-            );
-            console.log(`✅ Driver notified of customer confirmation`);
+        // ✅ FIX BUG 2: Update pendingCompletions agar setTimeout tidak kirim template lagi
+        for (const [oid, pending] of pendingCompletions) {
+            const pendingCustomerPhone = normalizePhoneNumber(pending.customer_phone);
+            if (pendingCustomerPhone?.slice(-10) === phoneSuffix && pending.status === 'waiting') {
+                pending.status = 'completed_by_customer';
+                pendingCompletions.set(oid, pending);
+                console.log(`✅ pendingCompletions[${oid}] marked completed_by_customer`);
+                break;
+            }
         }
 
-        // ✅ 3. LANGSUNG proses settlement (status sudah DELIVERED dari driver sebelumnya)
+        // 1. Konfirmasi ke customer
+        await sendWhatsAppFreeForm(rawCustomerPhone,
+            `✅ Terima kasih *${order.customer_name}*! Pesanan *${order.order_id}* telah dikonfirmasi selesai. 🙏`
+        );
+
+        // ✅ FIX BUG 1: Pakai free-form ke driver, BUKAN templateDriverOrderComplete
+        if (order.driver_phone) {
+            await sendWhatsAppFreeForm(
+                order.driver_phone,
+                `✅ *Pesanan ${order.order_id} SELESAI!*\n\nCustomer *${order.customer_name}* telah mengkonfirmasi pesanan diterima.\nDana Anda akan segera dicairkan. Terima kasih! 🙏`
+            );
+            console.log(`✅ Driver notified via free-form (no quick reply)`);
+        }
+
+        // 3. Settlement
         try {
             await processOrderSettlement(order);
             console.log(`✅ Settlement completed for order ${order.order_id}`);
@@ -1491,7 +1495,6 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
 
         return res.sendStatus(200);
     }
-
 
     // ── HANDLE: Accept / Reject driver (kode lama) ─────────────────────────
     let foundOrderId = null;
