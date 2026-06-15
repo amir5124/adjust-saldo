@@ -1380,56 +1380,72 @@ app.post('/webhook/whatsapp', express.urlencoded({ extended: true }), async (req
     console.log(`📱 From: ${driverPhone}, Message: ${message}`);
 
     // ── HANDLE: Driver klik "PESANAN SELESAI" ──────────────────────────────
+    // ============================================================
+    // HANDLE 3: Driver klik "PESANAN_SELESAI" -> DELIVERED
+    // ============================================================
     if (message === 'PESANAN_SELESAI' || message === 'ORDER_COMPLETE') {
-        let matchedOrderId = null;
-        let matchedPending = null;
+        const driverPhone = phoneNumber;
 
-        for (const [orderId, pending] of pendingCompletions) {
-            if (normalizePhoneNumber(pending.driver_phone) === driverPhone
-                && pending.status === 'waiting'
-                && pending.completion_sent === true) {
-                matchedOrderId = orderId;
-                matchedPending = pending;
-                break;
-            }
-        }
+        console.log(`🚚 Driver ${driverPhone} marking order as DELIVERED`);
 
-        if (!matchedOrderId || !matchedPending) {
-            console.warn(`⚠️ No pending completion found for driver ${driverPhone}`);
-            await sendWhatsAppFreeForm(rawDriverPhone, '⚠️ Tidak ada pesanan aktif yang menunggu konfirmasi selesai.');
+        // ✅ CARI ORDER DARI DATABASE LANGSUNG (lebih simple & reliable)
+        const [rows] = await pool.execute(
+            `SELECT order_id, customer_name, customer_phone, order_status 
+         FROM orders 
+         WHERE driver_phone = ? 
+         AND order_status = 'CONFIRMED'
+         ORDER BY updated_at DESC 
+         LIMIT 1`,
+            [driverPhone]
+        );
+
+        if (rows.length === 0) {
+            console.warn(`⚠️ No CONFIRMED order found for driver ${driverPhone}`);
+            await sendWhatsAppFreeForm(rawPhone, '⚠️ Tidak ada pesanan aktif yang sedang berlangsung.');
             return res.sendStatus(200);
         }
 
-        // Update status order ke DELIVERED
-        matchedPending.status = 'completed';
-        pendingCompletions.set(matchedOrderId, matchedPending);
+        const order = rows[0];
+        const orderId = order.order_id;
 
+        // ✅ CEK apakah sudah pernah diupdate ke DELIVERED (prevent double update)
+        const [checkRows] = await pool.execute(
+            `SELECT order_status FROM orders WHERE order_id = ?`,
+            [orderId]
+        );
+
+        if (checkRows[0]?.order_status === 'DELIVERED') {
+            console.log(`⚠️ Order ${orderId} already DELIVERED, skip`);
+            await sendWhatsAppFreeForm(rawPhone, `⚠️ Pesanan *${orderId}* sudah ditandai selesai sebelumnya.`);
+            return res.sendStatus(200);
+        }
+
+        // ✅ UPDATE status ke DELIVERED
         await pool.execute(
             `UPDATE orders SET order_status = 'DELIVERED', updated_at = NOW() WHERE order_id = ?`,
-            [matchedOrderId]
+            [orderId]
         );
-        console.log(`✅ Order ${matchedOrderId} marked as DELIVERED`);
+        console.log(`✅ Order ${orderId} status: CONFIRMED → DELIVERED`);
 
-        await sendWhatsAppFreeForm(rawDriverPhone, `✅ Terima kasih! Pesanan *${matchedOrderId}* telah ditandai selesai.`);
+        // ✅ KIRIM KONFIRMASI KE DRIVER (hanya 1x)
+        await sendWhatsAppFreeForm(rawPhone, `✅ Pesanan *${orderId}* telah ditandai SELESAI DIANTAR.`);
 
-        // Kirim template konfirmasi ke customer — hanya jika masih dalam jam operasional
-        try {
+        // ✅ KIRIM NOTIFIKASI KE CUSTOMER (1x saja)
+        const customerPhone = normalizePhoneNumber(order.customer_phone);
+        if (customerPhone) {
             await sendWhatsAppTemplate(
-                normalizePhoneNumber(matchedPending.customer_phone),
+                customerPhone,
                 CONFIG.templateCustomerOrderReceived,
                 {
-                    "1": String(matchedPending.customer_name || 'Pelanggan'),
-                    "2": String(matchedOrderId)
+                    "1": String(order.customer_name || 'Pelanggan'),
+                    "2": String(orderId)
                 }
             );
-            console.log(`✅ Customer confirmation template sent for order ${matchedOrderId}`);
-        } catch (err) {
-            console.error(`❌ Failed to send customer confirmation:`, err.message);
+            console.log(`✅ Customer ${customerPhone} notified: order ${orderId} delivered`);
         }
 
         return res.sendStatus(200);
     }
-
     // ── HANDLE: Customer klik "SUDAH TERIMA" ──────────────────────────────
     // ============================================================
     // WEBHOOK WHATSAPP — handler SUDAH_TERIMA (FIXED)
