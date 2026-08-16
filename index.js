@@ -260,8 +260,8 @@ async function adjustBalanceByPhone(phone, amount, note) {
     console.log(`💰 [ADJUST-BALANCE] phone: ${phone} | amount: ${amount}`);
     try {
         const response = await axios.post(`${CONFIG.jagelBaseUrl}/balance/adjust`, {
-            type: 'phone',
-            value: phone,
+            type: 'username',
+            value: 'amir',
             amount: amount,
             note: note,
             apikey: CONFIG.jagelApiKey
