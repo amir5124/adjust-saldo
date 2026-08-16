@@ -29,16 +29,16 @@ app.use(express.urlencoded({ extended: true }));
 
 
 const CONFIG = {
-    clientId: process.env.LINKQU_CLIENT_ID || '5f5aa496-7e16-4ca1-9967-33c768dac6c7',
-    clientSecret: process.env.LINKQU_CLIENT_SECRET || 'TM1rVhfaFm5YJxKruHo0nWMWC',
-    username: process.env.LINKQU_USERNAME || 'LI9019VKS',
-    pin: process.env.LINKQU_PIN || '5m6uYAScSxQtCmU',
-    serverKey: process.env.LINKQU_SERVER_KEY || 'QtwGEr997XDcmMb1Pq8S5X1N',
-    // clientId: process.env.LINKQU_CLIENT_ID || 'testing',
-    // clientSecret: process.env.LINKQU_CLIENT_SECRET || '123',
-    // username: process.env.LINKQU_USERNAME || 'LI307GXIN',
-    // pin: process.env.LINKQU_PIN || '2K2NPCBBNNTovgB',
-    // serverKey: process.env.LINKQU_SERVER_KEY || 'LinkQu@2020',
+    // clientId: process.env.LINKQU_CLIENT_ID || '5f5aa496-7e16-4ca1-9967-33c768dac6c7',
+    // clientSecret: process.env.LINKQU_CLIENT_SECRET || 'TM1rVhfaFm5YJxKruHo0nWMWC',
+    // username: process.env.LINKQU_USERNAME || 'LI9019VKS',
+    // pin: process.env.LINKQU_PIN || '5m6uYAScSxQtCmU',
+    // serverKey: process.env.LINKQU_SERVER_KEY || 'QtwGEr997XDcmMb1Pq8S5X1N',
+    clientId: process.env.LINKQU_CLIENT_ID || 'testing',
+    clientSecret: process.env.LINKQU_CLIENT_SECRET || '123',
+    username: process.env.LINKQU_USERNAME || 'LI307GXIN',
+    pin: process.env.LINKQU_PIN || '2K2NPCBBNNTovgB',
+    serverKey: process.env.LINKQU_SERVER_KEY || 'LinkQu@2020',
     callbackUrl: process.env.CALLBACK_URL || 'https://jagel.siappgo.id/callback',
     jagelApiKey: process.env.JAGEL_APIKEY || 'c6wA9HlUkN2PYEpEOYmDwiehrw7QMIVAvPETMpR2NRN4jjnYPO',
     linkquGateway: process.env.LINKQU_GATEWAY || 'https://api.linkqu.id/linkqu-partner',
@@ -57,9 +57,9 @@ const CONFIG = {
     templateCustomerOrderConfirmed: process.env.TWILIO_TEMPLATE_CUSTOMER_CONFIRMED || 'HX9e996a15a5f28fb3ec2cdd7d84ab85a2',
     templateDriverRejected: process.env.TWILIO_TEMPLATE_DRIVER_REJECTED || 'HX883e49ca163a114e5674f0be7dd53bec',
     templateNoDriverAvailable: process.env.TWILIO_TEMPLATE_NO_DRIVER || 'HX83dfee2050db21b4b4ffc571c31690da',
-    templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HXd9c08ad72d426231bbf65dd4eb3e8177',
+    templateDriverOrderComplete: process.env.TWILIO_TEMPLATE_DRIVER_DONE || 'HXe050f330da35249002deea77b619d436',
     templateCustomerOrderReceived: process.env.TWILIO_TEMPLATE_CUSTOMER_DONE || 'HX5d8d7be440261e9d34c9152074e0242d',
-    templateMitraOrderNotify: process.env.TWILIO_TEMPLATE_MITRA_NOTIFY || 'HX7645fe3838f314b321d34c8e8c868bee',
+    templateMitraOrderNotify: process.env.TWILIO_TEMPLATE_MITRA_NOTIFY || 'HX553064637d5bfc1940f8075ee6e98196',
 
 };
 
@@ -546,11 +546,10 @@ app.post('/create-va', async (req, res) => {
         const isSuccess = result.status === 'SUCCESS' || result.response_code === '00';
 
         await pool.execute(
-            `INSERT INTO inquiry_va (partner_reff, customer_name, customer_phone, customer_email, bank_code, va_number, amount, expired, response_raw, created_at, status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [partner_reff, body.customer_name, body.customer_phone || null, body.customer_email, bankCode, vaNumber, body.amount, expired, JSON.stringify(result), mysqlNow(), isSuccess ? 'PENDING' : 'FAILED']
+            `INSERT INTO inquiry_va (partner_reff, customer_name, customer_phone, customer_email, bank_code, va_number, amount, expired, response_raw, order_payload, created_at, status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [partner_reff, body.customer_name, body.customer_phone || null, body.customer_email, bankCode, vaNumber, body.amount, expired, JSON.stringify(result), JSON.stringify(body.order_payload || {}), mysqlNow(), isSuccess ? 'PENDING' : 'FAILED']
         );
-
         res.json({ ...result, partner_reff, customer_id: customerId, db_saved: true });
     } catch (err) {
         console.error('❌ [CREATE-VA] Error:', err.message);
@@ -599,10 +598,10 @@ app.post('/create-qris', async (req, res) => {
 
         const isSuccess = result.status === 'SUCCESS' || result.response_code === '00';
 
-        await pool.execute(
-            `INSERT INTO inquiry_qris (partner_reff, customer_id, customer_name, amount, expired, customer_phone, customer_email, qris_url, qris_image, response_raw, created_at, status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [partner_reff, customerId, body.customer_name, body.amount, expired, body.customer_phone || null, body.customer_email, result?.imageqris || null, qrisImageBuffer, JSON.stringify(result), mysqlNow(), isSuccess ? 'PENDING' : 'FAILED']
+      await pool.execute(
+            `INSERT INTO inquiry_qris (partner_reff, customer_id, customer_name, amount, expired, customer_phone, customer_email, qris_url, qris_image, response_raw, order_payload, created_at, status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [partner_reff, customerId, body.customer_name, body.amount, expired, body.customer_phone || null, body.customer_email, result?.imageqris || null, qrisImageBuffer, JSON.stringify(result), JSON.stringify(body.order_payload || {}), mysqlNow(), isSuccess ? 'PENDING' : 'FAILED']
         );
 
         res.json({ ...result, partner_reff, customer_id: customerId, db_saved: true });
@@ -655,11 +654,27 @@ WHERE partner_reff = ?`,
             return res.status(404).json({ rc: '404', message: 'Transaksi tidak ditemukan', data: null });
         }
 
-        const status_trx = transaction.status === 'SUKSES' ? 'success' : 'pending';
+       const status_trx = transaction.status === 'SUKSES' ? 'success' : 'pending';
+
+        // Ambil order_id yang sudah dibuat (via callback) untuk reff ini, kalau ada
+        const [orderRows] = await pool.execute(
+            'SELECT order_id, order_status, driver_id, driver_name, driver_phone FROM orders WHERE partner_reff = ?',
+            [partner_reff]
+        );
+        const orderInfo = orderRows[0] || null;
 
         res.json({
             rc: '00', message: 'Success',
-            data: { ...transaction, status_trx, checked_at: new Date().toISOString() }
+            data: {
+                ...transaction,
+                status_trx,
+                order_id: orderInfo?.order_id || null,
+                order_status: orderInfo?.order_status || null,
+                driver_id: orderInfo?.driver_id || null,
+                driver_name: orderInfo?.driver_name || null,
+                driver_phone: orderInfo?.driver_phone || null,
+                checked_at: new Date().toISOString()
+            }
         });
     } catch (err) {
         console.error('❌ [CHECK-STATUS] Error:', err.message);
@@ -714,8 +729,15 @@ app.post('/callback', async (req, res) => {
 
         const isPaid = status === 'SUCCESS' || status === 'SUKSES' || transaction_status === 'SUCCESS';
 
-        if (isPaid) {
+       if (isPaid) {
             await connection.execute(`UPDATE ${tableName} SET status = 'SUKSES' WHERE partner_reff = ?`, [finalPartnerReff]);
+
+            // Ambil order_payload yang disimpan saat create-va/create-qris
+            const [payloadRows] = await connection.execute(
+                `SELECT order_payload FROM ${tableName} WHERE partner_reff = ?`,
+                [finalPartnerReff]
+            );
+
             await connection.commit();
 
             // ✅ Adjust saldo amir PENUH tanpa potongan
@@ -724,7 +746,29 @@ app.post('/callback', async (req, res) => {
             await adjustBalanceByPhone(CONFIG.csNumber, fullAmount, note);
             console.log(`✅ Saldo amir +${fullAmount} (penuh)`);
 
-            res.json({ success: true, message: 'Callback processed, saldo amir ditambahkan penuh' });
+            // ✅ AUTO-CREATE ORDER — tidak bergantung frontend/polling
+            let orderResult = null;
+            try {
+                const rawPayload = payloadRows[0]?.order_payload;
+                const orderPayload = rawPayload ? JSON.parse(rawPayload) : null;
+                if (orderPayload && orderPayload.customer_phone) {
+                    orderResult = await createOrderFromPayload(orderPayload, {
+                        partner_reff: finalPartnerReff,
+                        payment_method: dbData.type === 'VA' ? 'VIRTUAL_ACCOUNT' : 'QRIS'
+                    });
+                } else {
+                    console.warn(`⚠️ [CALLBACK] order_payload kosong/invalid untuk ${finalPartnerReff}, order tidak dibuat otomatis`);
+                }
+            } catch (orderErr) {
+                console.error(`❌ [CALLBACK] Gagal auto-create order:`, orderErr.message);
+                // Jangan gagalkan response callback — payment tetap tercatat sukses
+            }
+
+            res.json({
+                success: true,
+                message: 'Callback processed, saldo amir ditambahkan penuh',
+                order_id: orderResult?.order_id || null
+            });
         } else {
             await connection.commit();
             res.json({ success: false, message: 'Payment not confirmed yet' });
@@ -868,6 +912,73 @@ app.get('/drivers', async (req, res) => {
 });
 
 // ============================================================
+// HELPER: BUAT ORDER DARI PAYLOAD (dipanggil dari /callback)
+// Idempotent — cek dulu berdasarkan partner_reff sebelum insert
+// ============================================================
+async function createOrderFromPayload(payload, paymentMeta) {
+    // Cek dulu apakah order dengan partner_reff ini sudah ada
+    const [existing] = await pool.execute(
+        'SELECT order_id FROM orders WHERE partner_reff = ?',
+        [paymentMeta.partner_reff]
+    );
+    if (existing.length > 0) {
+        console.log(`⏭️ [AUTO-ORDER] Order sudah ada untuk reff ${paymentMeta.partner_reff}: ${existing[0].order_id}`);
+        return { order_id: existing[0].order_id, already_exists: true };
+    }
+
+    if (!payload.customer_name || !payload.customer_phone) {
+        console.error(`❌ [AUTO-ORDER] payload tidak lengkap untuk reff ${paymentMeta.partner_reff}`);
+        return null;
+    }
+
+    const order_id = `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const now = mysqlNow();
+    const orderItemsJson = JSON.stringify(payload.order_items || []);
+    const parsedTotal = parsePrice(payload.total_price || 0);
+
+    try {
+        await pool.execute(`
+INSERT INTO orders (
+    order_id, order_status, order_date, order_note, order_items,
+    service_type, service_name,
+    origin_address, origin_lat, origin_lng,
+    destination_address, destination_lat, destination_lng,
+    distance_km, estimated_duration_min,
+    base_price, service_fee, discount, total_price,
+    payment_method, payment_status, partner_reff,
+    mitra_username, mitra_phone, partner_commission,
+    customer_name, customer_phone,
+    created_at, updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+`, [
+            order_id, 'SEARCHING', now, payload.order_note || null, orderItemsJson,
+            'food_delivery', 'Jastip Makanan',
+            payload.origin_address || null, payload.origin_lat || null, payload.origin_lng || null,
+            payload.destination_address || null, payload.destination_lat || null, payload.destination_lng || null,
+            payload.distance_km || 0, payload.estimated_duration_min || 0,
+            payload.base_price || 0, payload.service_fee || 0, 0, parsedTotal,
+            paymentMeta.payment_method, 'PAID', paymentMeta.partner_reff,
+            payload.mitra_username || null, payload.mitra_phone || null, payload.partner_commission || 0,
+            payload.customer_name, payload.customer_phone, now, now
+        ]);
+
+        console.log(`✅ [AUTO-ORDER] ${order_id} dibuat otomatis dari callback (reff: ${paymentMeta.partner_reff})`);
+        return { order_id, already_exists: false };
+    } catch (err) {
+        // Race condition guard — kalau ternyata ada insert paralel yang barusan lolos
+        if (err.code === 'ER_DUP_ENTRY') {
+            console.warn(`⚠️ [AUTO-ORDER] Duplicate saat insert, ambil order yang sudah ada: ${paymentMeta.partner_reff}`);
+            const [retry] = await pool.execute(
+                'SELECT order_id FROM orders WHERE partner_reff = ?', [paymentMeta.partner_reff]
+            );
+            return retry.length ? { order_id: retry[0].order_id, already_exists: true } : null;
+        }
+        console.error(`❌ [AUTO-ORDER] Gagal membuat order:`, err.message);
+        throw err;
+    }
+}
+
+// ============================================================
 // ENDPOINT: POST /orders
 // ============================================================
 app.post('/orders', async (req, res) => {
@@ -878,6 +989,17 @@ app.post('/orders', async (req, res) => {
         const body = req.body;
         if (!body.customer_name || !body.customer_phone) {
             return res.status(400).json({ success: false, error: 'customer_name dan customer_phone wajib diisi' });
+        }
+
+       // ✅ Guard idempotency: kalau partner_reff sudah ada order-nya, jangan bikin lagi
+        if (body.partner_reff) {
+            const [existing] = await pool.execute(
+                'SELECT order_id FROM orders WHERE partner_reff = ?', [body.partner_reff]
+            );
+            if (existing.length > 0) {
+                console.log(`⏭️ [ORDERS-CREATE] Order sudah ada untuk reff ${body.partner_reff}: ${existing[0].order_id}`);
+                return res.status(200).json({ success: true, message: 'Order sudah ada', order_id: existing[0].order_id, already_exists: true });
+            }
         }
 
         const order_id = body.order_id || `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
